@@ -164,6 +164,7 @@ schemas/            7 个 JSON Schema
 | --- | --- |
 | P2-1 SKILL.md 分层 | 第 2 节新增「按需读取」路由表；第 7 节的方法论（五阶段、八字段、粒度、优先级）收敛为三条红线 + 指向 `references/task-decomposition.md` / `dependency-management.md`；文件索引去重；硬规则补到 15 条 |
 | P2-2 上下文变更检测 | `accept` 记录 `deliverables`（`outputs`/`files_scope` 里真实存在的文件：小文件 sha256、大文件 size+mtime，附 git HEAD）。`start` 比对直接依赖记录、且在本节点 `inputs` 里声明的文件；变了就拒绝，`--ack-context --reason` 留档到 `context_acks` |
+| P2-4 文档一致性测试 | `tests/test_docs_consistency.py`：命令清单、Schema/模板数量、必需检查项、节点状态、回归状态枚举与代码对齐，防止文档和实现漂移 |
 | P2-3 自动化验收 | 新增 `df.py self-test`：临时目录从 `init` 跑到 `release-accept`（28 步），不读写真实项目；`--fast` 只跑端到端，`--json/--out` 输出机器可读结果，`--keep` 保留现场；分层报告单元（引擎）/ 集成（示例项目）/ 端到端，任一失败退出码 1 |
 
 ### 8.2 设计取舍
@@ -184,7 +185,7 @@ self-test 第一次跑就撞上了。已补字段，并把 `base_plan_version` �
 
 | 层 | 数量 |
 | --- | --- |
-| 引擎单元 / 集成 | 132 条全绿 |
+| 引擎单元 / 集成 | 142 条全绿 |
 | 示例项目 | 74 条全绿 |
 | 端到端（`self-test`） | 28 步 → accepted |
 

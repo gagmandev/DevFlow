@@ -349,6 +349,8 @@ $DF sync DF-003 --external --from /path/to/reports
 - 缺配置/要决策的问题，**不要靠改代码硬绕**。
 - `retry` 会累计 attempts，超过上限要 `--force`，防止无限重试。
 - 重试/返工前，旧报告会自动归档到 `nodes/<ID>/history/`，不会覆盖历史证据。
+- 确定不做的节点用 `cancel <ID> --reason "..."`，被别的节点取代用
+  `supersede <ID> --by DF-XXX`——都保留原节点，不删。
 
 ## 12. change · 需求变更
 
