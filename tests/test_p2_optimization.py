@@ -107,10 +107,12 @@ class SelfTestCommandTest(unittest.TestCase):
     """P2-3：self-test 在临时目录跑完整生命周期，不碰真实项目。"""
 
     def test_self_test_runs_end_to_end(self):
-        code, out = quiet(df.main, ["self-test", "--json"])
+        # --fast：分层（单元/集成）由 self-test 自己按需跑，测试里不重复跑全量
+        code, out = quiet(df.main, ["self-test", "--json", "--fast"])
         self.assertEqual(code, 0, out)
         payload = json.loads(out[out.index("{"):])
         self.assertEqual(payload["status"], "passed", out)
+        self.assertEqual(payload["layers"], {})
         steps = {s["step"]: s for s in payload["steps"]}
         for name in (
             "init", "req-import", "req-confirm", "plan-import", "validate",
@@ -124,7 +126,7 @@ class SelfTestCommandTest(unittest.TestCase):
 
     def test_self_test_leaves_no_residue(self):
         before = set(SKILL_DIR.glob(".devflow*"))
-        code, out = quiet(df.main, ["self-test"])
+        code, out = quiet(df.main, ["self-test", "--fast"])
         self.assertEqual(code, 0, out)
         self.assertEqual(set(SKILL_DIR.glob(".devflow*")), before)
 

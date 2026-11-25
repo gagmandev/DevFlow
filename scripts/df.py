@@ -17,12 +17,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
+import time
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2120,6 +2125,399 @@ def cmd_recover(args) -> int:
     return 1 if failed else 0
 
 
+# --------------------------------------------------------------------------
+# self-test：在临时目录里把整条流水线跑一遍
+# --------------------------------------------------------------------------
+
+SELF_TEST_REQUIREMENTS = """# 需求确认说明书 · self-test
+
+> 这份文档由 `df.py self-test` 生成，只用于验证流水线能否从空目录一路走到验收。
+> 内容必须足够完整，才能通过 req-confirm 的"像不像一份需求基准"检查。
+
+## 一、项目目标
+
+验证 DevFlow 在临时目录中能完成：需求导入 → 需求确认 → 计划导入 → 依赖检查 →
+计划激活 → 节点执行 → 证据同步 → 验收 → 变更 → 新版计划 → 回归 → 交付 → 用户验收。
+整个过程不读写任何真实项目文件，结束后临时目录自动清理。
+
+## 二、功能需求
+
+- REQ-001 生成一份可读的输出文件 a.txt，内容非空且稳定可重复。
+
+## 三、业务规则
+
+- 输出内容只由节点实现决定，不依赖系统时间、随机数或外部网络。
+- 同一节点重复执行应得到相同结果，便于回归比对。
+
+## 四、非功能需求
+
+- 不引入第三方依赖，只使用 Python 标准库。
+- 所有文件写入使用原子写，异常时不留下半截文件。
+
+## 五、验收标准
+
+- [ ] `a.txt` 存在且内容非空
+- [ ] 相关命令退出码为 0
+- [ ] 全量回归报告的必需检查项全部 passed
+
+## 六、明确不做
+
+- 不实现真实业务逻辑，本文件仅服务于流水线自检。
+- 不做性能压测、不做多进程并发验证（那由单元测试覆盖）。
+"""
+
+SELF_TEST_CHECKS = (
+    "build", "unit_test", "integration", "core_flow", "consistency", "requirement_acceptance",
+)
+
+
+class _SelfTest:
+    """一个自包含的端到端验收：从空目录初始化到 accepted。"""
+
+    def __init__(self, keep: bool = False):
+        self.keep = keep
+        if keep:
+            # mkdtemp 不会在解释器退出时自动删除，方便排查
+            self._tmp = None
+            base = Path(tempfile.mkdtemp(prefix="devflow-self-test-"))
+        else:
+            self._tmp = tempfile.TemporaryDirectory()
+            base = Path(self._tmp.name)
+        self.root = base / "demo"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.steps: list[dict] = []
+
+    def close(self):
+        if self._tmp is not None:
+            self._tmp.cleanup()
+
+    # -- 基础设施 ---------------------------------------------------------
+    def run(self, step: str, argv: list[str], allow: tuple[int, ...] = (0,)) -> bool:
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf_out), redirect_stderr(buf_err):
+            try:
+                code = main([*argv, "--project", str(self.root)])
+            except DevFlowError as exc:  # 提前失败也要记进步骤
+                code = 2
+                buf_err.write(str(exc))
+        detail = (buf_out.getvalue() + buf_err.getvalue()).strip()
+        ok = code in allow
+        self.steps.append({
+            "step": step,
+            "status": "passed" if ok else "failed",
+            "exit_code": code,
+            "detail": detail.splitlines()[-1] if detail else "",
+        })
+        return ok
+
+    def write(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def payload(self, rel: str, data: dict) -> str:
+        self.write(rel, json.dumps(data, ensure_ascii=False, indent=2))
+        return str(self.root / rel)
+
+    # -- 数据 -------------------------------------------------------------
+    def plan_v1(self):
+        return {
+            "requirement_version": 1,
+            "nodes": [
+                {
+                    "node_id": "DF-001", "node_name": "生成核心产物", "phase": "Foundation",
+                    "type": "business", "priority": "P0", "description": "写一个 a.txt",
+                    "requirement_ids": ["REQ-001"], "dependencies": [], "parallelizable": False,
+                    "parallel_group": None, "acceptance_criteria": ["a.txt 存在且内容非空"],
+                    "inputs": [], "outputs": ["a.txt"], "files_scope": ["a.txt"],
+                    "test_strategy": ["读取 a.txt 断言非空"], "status": "pending",
+                    "prompt_file": ".devflow/nodes/DF-001/prompt.md",
+                },
+                {
+                    "node_id": "DF-002", "node_name": "在核心产物上追加", "phase": "Foundation",
+                    "type": "business", "priority": "P1", "description": "给 a.txt 追加一行",
+                    "requirement_ids": [], "dependencies": ["DF-001"], "parallelizable": False,
+                    "parallel_group": None, "acceptance_criteria": ["a.txt 有两行"],
+                    "inputs": ["a.txt"], "outputs": ["a.txt"], "files_scope": ["a.txt"],
+                    "test_strategy": ["统计行数"], "status": "pending",
+                    "prompt_file": ".devflow/nodes/DF-002/prompt.md",
+                },
+            ],
+        }
+
+    def plan_v2(self):
+        plan = self.plan_v1()
+        plan["plan_version"] = 2
+        plan["based_on"] = {"change_id": "CR-001", "plan_version": 1}
+        # 已完成的节点保持 completed：变更只新增，不返工
+        for item in plan["nodes"]:
+            item["status"] = "completed"
+            item["attempts"] = 1
+        plan["nodes"].append({
+            "node_id": "DF-003", "node_name": "补充说明文档", "phase": "Foundation",
+            "type": "release", "priority": "P1", "description": "写 b.md",
+            "requirement_ids": [], "dependencies": ["DF-002"], "parallelizable": False,
+            "parallel_group": None, "acceptance_criteria": ["b.md 存在"],
+            "inputs": [], "outputs": ["b.md"], "files_scope": ["b.md"],
+            "test_strategy": ["文件存在即可"], "status": "pending",
+            "prompt_file": ".devflow/nodes/DF-003/prompt.md",
+            "created_in_plan": 2,
+        })
+        return plan
+
+    def regression_payload(self, plan_version: int) -> dict:
+        now = core.now_iso()
+        return {
+            "schema_version": "1.0",
+            "plan_version": plan_version,
+            "requirement_version": 1,
+            "status": "passed",
+            "executed_at": now,
+            "executed_by": "self-test",
+            "checks": [
+                {
+                    "check_id": cid, "name": cid, "required": True, "status": "passed",
+                    "command": "self-test simulated", "exit_code": 0, "executed_at": now,
+                    "evidence": "self-test 模拟执行", "notes": "",
+                }
+                for cid in SELF_TEST_CHECKS
+            ],
+            "notes": "由 df.py self-test 生成，仅用于验证流水线本身。",
+        }
+
+    def node_evidence(self, node_id: str, name: str, criteria: list[str], plan_version: int,
+                      modified: list[str]) -> None:
+        plan = core.load_json(core.Paths(self.root).backlog(plan_version))
+        item = next(n for n in plan["nodes"] if n["node_id"] == node_id)
+        attempt = item.get("current_attempt_id")
+        evidence = {
+            "node_id": node_id,
+            "attempt_id": attempt,
+            "plan_version": plan_version,
+            "requirement_version": plan["requirement_version"],
+            "result": "success",
+            "modified_files": modified,
+            "acceptance": [
+                {"criterion": c, "met": True, "evidence": f"self-test: {name}"} for c in criteria
+            ],
+            "assumptions": [],
+            "leftovers": [],
+        }
+        report = {
+            "node_id": node_id,
+            "attempt_id": attempt,
+            "plan_version": plan_version,
+            "requirement_version": plan["requirement_version"],
+            "status": "passed",
+            "executed_at": core.now_iso(),
+            "commands": [{"cmd": "self-test simulated", "exit_code": 0}],
+            "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
+            "cases": [{"name": name, "result": "pass"}],
+        }
+        self.write(
+            f".devflow/nodes/{node_id}/execution-report.md",
+            "# 执行报告\n\n```devflow-execution\n"
+            + json.dumps(evidence, ensure_ascii=False, indent=2)
+            + "\n```\n",
+        )
+        self.write(
+            f".devflow/nodes/{node_id}/test-report.json",
+            json.dumps(report, ensure_ascii=False, indent=2),
+        )
+
+    def complete(self, node_id: str, name: str, criteria: list[str], plan_version: int,
+                 modified: list[str], produce: dict[str, str] | None = None) -> bool:
+        if not self.run("start", ["start", node_id]):
+            return False
+        for rel, text in (produce or {}).items():
+            self.write(rel, text)
+        self.node_evidence(node_id, name, criteria, plan_version, modified)
+        if not self.run("sync", ["sync", node_id]):
+            return False
+        return self.run("accept", ["accept", node_id])
+
+    # -- 主流程 -----------------------------------------------------------
+    def execute(self) -> bool:
+        ok = self.run("init", ["init", "--name", "Self Test", "--id", "self-test",
+                              "--type", "greenfield"])
+        if not ok:
+            return False
+
+        req_doc = ".devflow/requirements/confirmed-requirements-v1.md"
+        self.write(req_doc, SELF_TEST_REQUIREMENTS)
+        trace = self.payload(".devflow/requirements/traceability-v1.json", {
+            "schema_version": "1.0",
+            "requirement_version": 1,
+            "requirements": [{
+                "req_id": "REQ-001", "title": "生成输出文件", "category": "functional",
+                "priority": "must", "status": "active", "statement": "生成 a.txt",
+                "source": "self-test", "acceptance": ["命令退出码为 0"],
+            }],
+        })
+        ok = self.run("req-import", ["req-import", "--file", trace, "--version", "1"]) and \
+            self.run("req-confirm", ["req-confirm", "--version", "1"])
+        if not ok:
+            return False
+
+        v1 = self.payload("plan-v1.json", self.plan_v1())
+        ok = self.run("plan-import", ["plan-import", "--file", v1, "--version", "1"]) and \
+            self.run("validate", ["validate", "--plan", "1"]) and \
+            self.run("prompt-init", ["prompt-init", "--all"]) and \
+            self.run("activate", ["plan-activate", "--version", "1", "--by", "self-test"]) and \
+            self.run("graph", ["graph"]) and \
+            self.run("validate-active", ["validate"])
+        if not ok:
+            return False
+
+        if not self.complete(
+            "DF-001", "生成核心产物", ["a.txt 存在且内容非空"], 1, ["a.txt"],
+            produce={"a.txt": "hello\n"},
+        ):
+            return False
+        if not self.complete(
+            "DF-002", "在核心产物上追加", ["a.txt 有两行"], 1, ["a.txt"],
+            produce={"a.txt": "hello\nworld\n"},
+        ):
+            return False
+
+        # 变更：新增 DF-003 → 新版计划 → 事务应用
+        ok = self.run("change-new", ["change-new", "--title", "补文档", "--type", "add"])
+        if not ok:
+            return False
+        cr_path = core.Paths(self.root).change_dir("CR-001") / "change-request.json"
+        cr = core.load_json(cr_path)
+        cr.update({
+            "status": "confirmed",
+            "base_plan_version": 1,
+            "base_requirement_version": 1,
+            "target_plan_version": 2,
+            "target_requirement_version": 1,
+            "impacts": [{"node_id": "DF-003", "action": "add", "reason": "补交付说明"}],
+        })
+        core.atomic_write_json(cr_path, cr)
+
+        v2 = self.payload("plan-v2.json", self.plan_v2())
+        ok = self.run("plan-import-v2",
+                      ["plan-import", "--file", v2, "--version", "2"]) and \
+            self.run("prompt-init-v2", ["prompt-init", "--all", "--plan", "2"]) and \
+            self.run("change-apply", ["change-apply", "--change", "CR-001"])
+        if not ok:
+            return False
+
+        if not self.complete(
+            "DF-003", "补充说明文档", ["b.md 存在"], 2, ["b.md"], produce={"b.md": "# 说明\n"},
+        ):
+            return False
+
+        ok = self.run("doctor", ["doctor"])
+        if not ok:
+            return False
+
+        if not self.run("regression-check", ["regression-check"]):
+            return False
+        reg = self.payload("regression.json", self.regression_payload(2))
+        ok = self.run("regression-import", ["regression-import", "--file", reg]) and \
+            self.run("release", ["release"]) and \
+            self.run("release-ready", ["release-ready"]) and \
+            self.run("release-accept", ["release-accept", "--by", "self-test"])
+        if not ok:
+            return False
+
+        project = core.load_json(core.Paths(self.root).project)
+        self.final_status = core.PROJECT_STATUS_MIGRATIONS.get(
+            project.get("status"), project.get("status")
+        )
+        return self.final_status == "accepted"
+
+    def report(self) -> dict:
+        failed = [s for s in self.steps if s["status"] != "passed"]
+        return {
+            "status": "passed" if (self.steps and not failed and
+                                   getattr(self, "final_status", None) == "accepted") else "failed",
+            "steps": self.steps,
+            "final_status": getattr(self, "final_status", None),
+            "temp_dir": str(self.root),
+        }
+
+
+def _run_layer(name: str, cwd: Path, pattern: str = "test_*.py") -> dict:
+    """跑一层测试，解析 unittest 的 'Ran N tests' / 'OK|FAILED'。
+
+    子进程带 `DEVFLOW_SELF_TEST_LAYERS=1`：万一测试里又调 self-test，
+    它不会再跑分层，避免无限递归。
+    """
+    env = dict(os.environ, DEVFLOW_SELF_TEST_LAYERS="1")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern],
+            cwd=str(cwd), capture_output=True, text=True, env=env,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"name": name, "status": "not_run", "detail": f"无法执行：{exc}"}
+    text = (proc.stdout or "") + (proc.stderr or "")
+    match = re.search(r"Ran (\d+) tests?", text)
+    count = int(match.group(1)) if match else 0
+    status = "passed" if proc.returncode == 0 else "failed"
+    detail = f"{count} 条测试，{'OK' if status == 'passed' else 'FAILED'}"
+    return {"name": name, "status": status, "detail": detail, "tests": count}
+
+
+def cmd_self_test(args) -> int:
+    """在临时目录跑完整生命周期；可选再跑单元/集成两层。"""
+    started = time.time()
+    harness = _SelfTest(keep=getattr(args, "keep", False))
+    try:
+        ok = harness.execute()
+        report = harness.report()
+    finally:
+        harness.close()
+
+    layers = {}
+    nested = os.environ.get("DEVFLOW_SELF_TEST_LAYERS") == "1"
+    if not getattr(args, "fast", False) and not nested:
+        layers["unit"] = _run_layer("单元测试（引擎）", SKILL_DIR)
+        layers["integration"] = _run_layer(
+            "集成测试（示例项目）", SKILL_DIR / "examples" / "sample-project"
+        )
+    elif nested:
+        print("（检测到嵌套调用，跳过分层，避免递归）")
+    report["layers"] = layers
+    report["duration_ms"] = int((time.time() - started) * 1000)
+    if layers and any(l["status"] != "passed" for l in layers.values()):
+        report["status"] = "failed"
+        ok = False
+
+    if getattr(args, "out", None):
+        out_path = Path(args.out).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        core.atomic_write_json(out_path, report)
+    else:
+        out_path = None
+
+    if getattr(args, "json", False) or getattr(args, "out", None):
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        print("== DevFlow self-test ==")
+        for step in report["steps"]:
+            mark = "✓" if step["status"] == "passed" else "✗"
+            print(f"{mark} {step['step']:<20} {step['detail']}")
+        print("")
+        if layers:
+            print("分层结果：")
+            for layer in layers.values():
+                print(f"  {'✓' if layer['status'] == 'passed' else '✗'} {layer['name']}：{layer['detail']}")
+        else:
+            print("分层结果：跳过（--fast）")
+        print(f"  {'✓' if report['status'] == 'passed' else '✗'} 端到端工作流："
+              f"{len(report['steps'])} 步 → {report['final_status']}")
+        print("")
+        print(f"结论：{'通过' if report['status'] == 'passed' else '失败'}（{report['duration_ms']} ms）")
+        if out_path:
+            print(f"机器可读报告：{out_path}")
+    return 0 if (ok and report["status"] == "passed") else 1
+
+
 def cmd_migrate(args) -> int:
     """把旧版 project.json 升级到当前 schema（不删字段、不重置状态）。"""
     _, paths, project = ctx(args)
@@ -2316,6 +2714,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("doctor", cmd_doctor, "全量体检")
     p.add_argument("--plan", type=int, default=None)
+
+    p = add("self-test", cmd_self_test, "在临时目录跑完整生命周期（不碰真实项目）")
+    p.add_argument("--json", action="store_true", help="输出机器可读结果")
+    p.add_argument("--fast", action="store_true", help="只跑端到端，不跑单元/集成两层")
+    p.add_argument("--keep", action="store_true", help="保留临时目录用于排查")
+    p.add_argument("--out", default=None, help="把结果写成 JSON 文件")
 
     return parser
 

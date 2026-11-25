@@ -132,6 +132,17 @@ $DF migrate      # 升级旧版 project.json（released → accepted）
 事务日志在 `.devflow/.txn/<id>/`，快照也在里面。回滚是确定安全的：
 只有全部写完才会标记 `committed`。
 
+## 七·六、自检（改引擎之后必跑）
+
+```bash
+$DF self-test            # 端到端 + 单元 + 示例项目集成
+$DF self-test --fast     # 只跑端到端
+$DF self-test --json --out self-test.json
+```
+
+在系统临时目录从空项目一路跑到 `accepted`（28 步），不碰任何真实项目。
+输出分三层：单元测试、集成测试（示例项目）、端到端工作流；任何一层失败都退出码 1。
+
 ## 八、常见问题
 
 **Q：能不能手动改 backlog-vN.json？**
@@ -143,6 +154,11 @@ $DF migrate      # 升级旧版 project.json（released → accepted）
 **Q：`accept` 说证据不全？**
 看它列的具体项：缺执行报告、缺 test-report.json、status 不是 passed、某条命令退出码非 0、
 统计对不上、验收标准没逐条对应、`attempt_id` 不一致。让执行 Agent 补齐后重新 `sync`。
+
+**Q：`start` 说"依赖产物被修改过"？**
+`accept` 时节点会记交付物指纹。上游节点完成后，如果你又改了它产出的文件（而本节点
+`inputs` 里声明了依赖它），`start` 会拦下来让你先评估影响。确认不影响就加
+`--ack-context --reason "为什么不影响"`，理由会留档。
 
 **Q：`sync` 说"只有 in_progress 能同步"？**
 先 `start`。`start` 会生成 `attempt_id`，没有它就无法区分本轮报告和上一轮的旧报告。

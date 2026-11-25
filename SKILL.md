@@ -61,6 +61,23 @@ $DF status        # 不在 DevFlow 项目内会明确报错
 
 自然语言就够，不需要用户记命令。但**你**要按上表的流程走。
 
+### 按需读取（不要一次全读）
+
+本文只放**入口、路由和安全规则**。细则按当前模式读对应文件，读完再动手：
+
+| 当前在做什么 | 读哪个 |
+| --- | --- |
+| 分析需求、写澄清问题 | `references/requirement-analysis.md` |
+| 拆节点、判粒度、定优先级 | `references/task-decomposition.md` |
+| 推依赖、判并行、看关键路径 | `references/dependency-management.md` |
+| 写节点提示词、执行节点、写报告 | `references/execution-rules.md` |
+| 定测试策略、写测试证据 | `references/testing-rules.md` |
+| 做变更影响分析 | `references/change-management.md` |
+| 回归、交付报告、验收 | `references/release-rules.md` |
+
+**机器能查的规则不要靠读文档记**：状态迁移、证据校验、范围比较、并行冲突、版本绑定，
+全部由 `df.py` / `validate.py` 强制执行。文档写错了以代码为准，并且要修文档。
+
 ## 3. init · 初始化
 
 ```bash
@@ -143,40 +160,20 @@ $DF req-confirm --version 1
 
 这是最容易做砸的一步。拆得好，后面全顺；拆得烂，Agent 之间互相踩。
 
-### 7.1 分五个阶段
+**方法与判据见 `references/task-decomposition.md`**（五阶段、八字段、粒度判据、按功能域拆、
+依赖推导、自查清单）。这里只留三条红线：
 
-| 阶段 | 内容 | 典型节点 |
-| --- | --- | --- |
-| Foundation | 框架、目录、配置、数据库结构、日志与异常基础设施 | 项目骨架、数据模型、迁移方案 |
-| Shared | 实体、DTO、仓储、公共服务、权限、统一返回、公共组件 | 仓储层、鉴权、通用校验 |
-| Business | 按**功能域**拆，不按技术层拆 | 账户服务、订单服务、流水查询 |
-| Integration | 联调、核心链路、接口契约、数据一致性、权限联调 | 端到端链路 + 并发验证 |
-| Release | 脚本整理、部署配置、交付文档、最终验收 | 部署说明、交付报告 |
+- 按**功能域**拆，不按技术层拆：`账户服务`、`流水查询` 是节点；`写所有 service` 不是。
+- 一个节点必须能独立验收：验收标准要能一句话判断真假（`1999 分奖励 19 分`，不是"代码质量好"）。
+- 一个节点涉及文件建议 ≤ 8 个；超过说明拆得不够细或边界没想清。
 
-按功能域拆的意思是：`账户服务`、`流水查询` 是节点；`写所有 service`、`写所有接口` 不是。
+优先级：`P0` 只给真正阻塞所有人的事，全标 P0 等于没有优先级。
 
-### 7.2 一个节点必须能独立验收
+### 7.1 依赖与并行
 
-每个节点写清 8 项：目标、输入、前置依赖、修改范围、实现要求、验收标准、测试方案、交付物。
-
-- 验收标准要能一句话判断真假。`代码质量好` 不是标准，`1999 分奖励 19 分` 是。
-- `files_scope` 是并发安全的核心。两个节点改同一批文件，就不能并行。
-- 一个节点涉及文件建议 ≤ 8 个。超过说明拆得不够细，或者边界没想清。
-- 不要为了凑数量把无关功能塞进一个节点。
-
-### 7.3 依赖与并行
-
-依赖要按真实约束推：数据模型 → 仓储 → 服务 → 接口；公共能力 → 业务；业务 → 集成。
-
-**同一阶段的节点不等于能并行。** 只有同时满足这些才能进同一个并行组：
-
-1. 前置依赖都已完成（或共享同一个已完成依赖）
-2. 彼此没有依赖关系
-3. `files_scope` 不重叠
-4. 接口契约已经确定
-5. 不涉及同一张表的结构变更
-
-拿不准会不会冲突，就不要标并行。串行只是慢一点，冲突要重做。
+依赖按真实约束推：数据模型 → 仓储 → 服务 → 接口；公共能力 → 业务；业务 → 集成。
+**同一阶段的节点不等于能并行**，六个条件（依赖、文件、契约、表、配置、阶段）见
+`references/dependency-management.md`。拿不准就不要标并行——串行只是慢，冲突要重做。
 
 **校验器会拦这些**（不是提醒）：同组直接依赖、**间接依赖**（A→B→C，A 和 C 同组）、
 `files_scope` 重叠、`db_objects` 撞同一张表、`api_contracts` 撞同一个接口、
@@ -190,7 +187,7 @@ $DF req-confirm --version 1
 
 拓扑分层只是"可以并行的候选"，不代表代码修改安全。别把同层节点直接塞进一个组。
 
-### 7.4 生成提示词
+### 7.2 生成提示词
 
 ```bash
 $DF prompt-init --all --plan 1        # 生成骨架（自动填需求/依赖/范围/验收/测试）
@@ -218,7 +215,7 @@ generated_at: ...
 一个合格的提示词，给一个**没读过需求文档、没参与过任何对话**的 Agent，它能独立做完。
 检查方法：把提示词单独贴给另一个会话，问它"你要改哪些文件、怎么验证"，答得上来才算合格。
 
-### 7.5 导入与审核
+### 7.3 导入与审核
 
 ```bash
 $DF plan-import --file backlog.json --version 1     # 生成 draft
@@ -235,10 +232,6 @@ $DF graph                                           # 看分层与关键路径
 ```bash
 $DF plan-activate --version 1 --by "用户名"
 ```
-
-### 7.6 优先级
-
-`P0` 只给真正阻塞所有人的事。不要把所有 Foundation 都标 P0——那等于没有优先级。
 
 ## 8. board / status / next · 看板与调度
 
@@ -259,6 +252,17 @@ $DF start DF-003
 
 `start` 会检查：计划是否生效、节点是否存在、状态是否允许、依赖是否完成。
 依赖没完成会直接拒绝并列出缺什么。**不要绕过它手动改状态。**
+
+还会做一次**上下文变更检查**：`accept` 时每个节点会记下自己交付物的指纹
+（`outputs` / `files_scope` 里真实存在的文件）。如果本节点 `inputs` 里的某个文件
+在被依赖节点完成之后被改过，`start` 会拒绝并要求重新评估影响：
+
+```bash
+$DF start DF-003 --ack-context --reason "只改了注释，接口未变"
+```
+
+确认后理由会写进 `context_acks` 留档。**没声明 `inputs` 的节点不做推断**——
+不要因为"仓库里别处改了个文档"就让所有下游返工。
 
 然后二选一：
 
@@ -414,6 +418,21 @@ $DF doctor             # 复查一致性
 **不允许出现两个 active 计划，也不允许 project.json 指向不存在的版本。**
 `doctor` 会检查这一点。
 
+## 12.5 改自己的引擎时先自检
+
+改过 `scripts/` 之后，除了跑单元测试，还要跑一遍端到端：
+
+```bash
+$DF self-test              # 临时目录跑完整生命周期 + 单元 + 示例项目集成
+$DF self-test --fast       # 只跑端到端，跳过两层测试（调试用）
+$DF self-test --keep       # 保留临时目录，方便进去看
+$DF self-test --json --out /tmp/self-test.json   # 机器可读结果
+```
+
+它在临时目录从 `init` 一路走到 `release-accept`（28 步），不读写任何真实项目。
+输出会分开报告三层：单元测试、集成测试（示例项目）、端到端工作流。
+任何一层失败都退出码 1——**不要用降低门槛的方式让它变绿**。
+
 ## 13. regression · 全量回归
 
 ```bash
@@ -515,20 +534,17 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 11. 越界修改不许"警告放过"：要么撤回，要么走变更扩范围，要么显式记录豁免。
 12. 旧报告不能冒充新执行：`attempt_id` 对不上就判失败。
 13. 生成交付报告 ≠ 交付；`accepted` 只能由用户明确验收产生。
+14. `accepted` 是终态：继续开发只能走变更流程，不能重跑命令把状态改回去。
+15. 不改 `scripts/` 之前先读代码；改完必须跑 `df.py self-test`，不许靠降门槛让它变绿。
 
 ## 16. 文件索引
 
 | 需要什么 | 看哪里 |
 | --- | --- |
-| 需求怎么分析 | `references/requirement-analysis.md` |
-| 任务怎么拆 | `references/task-decomposition.md` |
-| 依赖怎么推、并行怎么判 | `references/dependency-management.md` |
-| 节点怎么执行 | `references/execution-rules.md` |
-| 测试怎么定 | `references/testing-rules.md` |
-| 变更怎么做 | `references/change-management.md` |
-| 回归与交付 | `references/release-rules.md` |
-| 数据结构 | `docs/data-structure.md` |
+| 业务方法论（需求 / 拆解 / 依赖 / 执行 / 测试 / 变更 / 回归） | 见第 2 节「按需读取」 |
+| 数据结构与不变量 | `docs/data-structure.md` |
 | 完整流程与示例 | `docs/workflow.md`、`examples/sample-project/` |
+| 架构与审计记录 | `docs/architecture.md`、`docs/engineering-audit.md` |
 | 配置项 | `config/*.yaml` |
-| 模板 | `templates/*.md` |
-| 校验 / 看板 / 依赖 | `scripts/validate.py`、`render_board.py`、`dependency_check.py` |
+| 模板 | `templates/` |
+| 校验 / 看板 / 依赖检查 | `scripts/validate.py`、`render_board.py`、`dependency_check.py` |

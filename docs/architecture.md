@@ -92,7 +92,7 @@ pending → ready → in_progress → needs_review → completed
 | 写到一半崩溃 | 临时文件 + `os.fsync` + `os.replace` 原子写 |
 | 多文件提交中途失败 | 快照 + 事务日志 + 回滚；`df.py recover` 处理残留事务 |
 | 看板与 JSON 不一致 | 看板只由 `render_board` 生成，每次状态变更自动重渲染 |
-| 结构写错 | 6 个 Schema + 语义校验，导入时就拦 |
+| 结构写错 | 7 个 Schema + 语义校验，导入时就拦 |
 | 依赖成环 | 导入时检测，有环拒绝 |
 | 证据造假 | 机器读 `test-report.json` + 执行报告证据块；统计自洽、命令退出码、验收逐条对应 |
 | 用旧报告冒充本轮 | `attempt_id` 绑定到执行尝试 |

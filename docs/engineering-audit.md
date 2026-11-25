@@ -1,22 +1,23 @@
-# DevFlow 工程质量审计（V1 → V1.2）
+# DevFlow 工程质量审计（V1 → V1.3）
 
 - 审计时间：2026-11-25
 - 审计范围：`SKILL.md`、`scripts/`、`schemas/`、`config/`、`templates/`、`references/`、`tests/`、`examples/sample-project/`
 - 结论：架构成立（文件驱动 + 单写者 + 证据门槛），但**校验层偏软**——
   多个关键约束只打印警告、不改变状态，等于没有约束。
-- 分轮次实施：第一轮 P0（证据 / 范围 / 锁 / 事务 / 交付状态机）已提交；
-  第二轮 P1（需求覆盖、回归 JSON、Git 核对、并行冲突、版本绑定）见第七、八节。
+- 分轮次实施：第一轮 P0（证据 / 范围 / 锁 / 事务 / 交付状态机）；
+  第二轮 P1（需求覆盖、回归 JSON、Git 核对、并行冲突、版本绑定）见第七节；
+  第三轮 P2（SKILL 分层、上下文变更检测、self-test）见第八节。
 
 ## 一、当前架构
 
 ```
-SKILL.md            主控：16 个模式路由
-df.py               状态机 CLI（22 个命令）
+SKILL.md            主控：模式路由 + 关键安全规则（细则在 references/）
+df.py               状态机 CLI（33 个命令）
 dfcore.py           路径 / 原子 IO / 配置 / 状态机 / 证据校验
 validate.py         Schema 子集校验 + 语义校验
 render_board.py     JSON → Markdown 看板
 dependency_check.py 环检测 / 分层 / 关键路径
-schemas/            6 个 JSON Schema
+schemas/            7 个 JSON Schema
 ```
 
 数据流：`df.py` 命令 → 读 `project.json` + `backlog-vN.json` → 改内存 → `atomic_write` 落盘 →
@@ -155,8 +156,40 @@ schemas/            6 个 JSON Schema
 | 端到端 | 引擎 117 条 + 示例项目 74 条全绿 |
 | 手工 | `df.py graph` / `df.py doctor` 在示例项目上通过 |
 
-## 八、尚未处理（P2）
+## 八、第三轮：P2 架构与可维护性
 
-- `SKILL.md` 进一步瘦身（把业务细则拆到 `references/`，按需加载）。
-- 项目上下文变更检测（关键交付物 SHA256 / commit / 契约版本 → 提示下游重评估）。
-- `df.py self-test` 端到端集成验收流程（临时目录跑完整生命周期）。
+### 8.1 做了什么
+
+| 项 | 实现 |
+| --- | --- |
+| P2-1 SKILL.md 分层 | 第 2 节新增「按需读取」路由表；第 7 节的方法论（五阶段、八字段、粒度、优先级）收敛为三条红线 + 指向 `references/task-decomposition.md` / `dependency-management.md`；文件索引去重；硬规则补到 15 条 |
+| P2-2 上下文变更检测 | `accept` 记录 `deliverables`（`outputs`/`files_scope` 里真实存在的文件：小文件 sha256、大文件 size+mtime，附 git HEAD）。`start` 比对直接依赖记录、且在本节点 `inputs` 里声明的文件；变了就拒绝，`--ack-context --reason` 留档到 `context_acks` |
+| P2-3 自动化验收 | 新增 `df.py self-test`：临时目录从 `init` 跑到 `release-accept`（28 步），不读写真实项目；`--fast` 只跑端到端，`--json/--out` 输出机器可读结果，`--keep` 保留现场；分层报告单元（引擎）/ 集成（示例项目）/ 端到端，任一失败退出码 1 |
+
+### 8.2 设计取舍
+
+- **只对声明的依赖做判断**：`inputs` 为空就不推断，仓库里改个文档不该让全部下游返工。
+  这比"全工作区 diff 一有变化就失效"更符合实际，也更不容易被当成噪音关掉。
+- **不新引依赖**：指纹只算 sha256（标准库），大文件退化到 size+mtime，避免给二进制算哈希。
+- **self-test 防递归**：分层子进程带 `DEVFLOW_SELF_TEST_LAYERS=1`，测试里再调 self-test 不会无限套娃。
+
+### 8.3 顺带修掉的缺陷
+
+`change.schema.json` 缺 `applied_at` 且 `additionalProperties: false`，而 `change-apply`
+会写这个字段 —— 任何真正走过变更的项目，`validate` / `doctor` 都会报错。
+self-test 第一次跑就撞上了。已补字段，并把 `base_plan_version` 的最小值放宽到 0
+（提出变更时项目可能还没有生效计划）。
+
+### 8.4 测试
+
+| 层 | 数量 |
+| --- | --- |
+| 引擎单元 / 集成 | 132 条全绿 |
+| 示例项目 | 74 条全绿 |
+| 端到端（`self-test`） | 28 步 → accepted |
+
+## 九、尚未处理
+
+- 契约级变更检测（`api_contracts` / `db_objects` 的版本化指纹，目前只做文件级）。
+- `self-test` 覆盖并行组与外部报告导入两条支线（目前走串行 + 本地报告）。
+- 多主控协同（当前设计明确只允许一个主控写全局状态）。

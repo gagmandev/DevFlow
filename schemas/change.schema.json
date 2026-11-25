@@ -27,7 +27,11 @@
     "requested_by": { "type": "string" },
     "requested_at": { "type": "string" },
     "base_requirement_version": { "type": "integer", "minimum": 1 },
-    "base_plan_version": { "type": "integer", "minimum": 1 },
+    "base_plan_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "基线计划版本；0 表示提出变更时项目还没有生效计划"
+    },
     "target_requirement_version": { "type": ["integer", "null"] },
     "target_plan_version": { "type": ["integer", "null"] },
     "description": { "type": "string" },
@@ -64,7 +68,11 @@
     },
     "recommended_plan": { "type": "string" },
     "confirmed_at": { "type": ["string", "null"] },
-    "confirmed_by": { "type": ["string", "null"] }
+    "confirmed_by": { "type": ["string", "null"] },
+    "applied_at": {
+      "type": ["string", "null"],
+      "description": "change-apply 提交成功的时间；status=applied 时必填"
+    }
   },
   "additionalProperties": false
 }

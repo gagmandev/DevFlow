@@ -105,6 +105,8 @@
 | `git_discrepancies` | | 实际变更与 `modified_files` 的差异 |
 | `git_waivers` | | 确认 Git 差异的记录 |
 | `db_objects` / `api_contracts` / `shared_config` | | 并行冲突检测用；同组不允许交集 |
+| `deliverables` | | `accept` 时记录的交付物指纹（sha256 或 size+mtime）与当时的 git HEAD |
+| `context_acks` | | 依赖产物变更后，主控确认「不影响本节点」的记录 |
 | `started_at` / `completed_at` / `accepted_by` | | 时间线 |
 | `superseded_by` | | 被哪个节点取代 |
 | `blocked_reason` | | 阻塞原因，`blocked` 必填 |
@@ -212,6 +214,7 @@ Markdown 由 `regression-import` 从 JSON 渲染，不手工维护。
 16. `accepted` 之后节点类与交付类命令全部拒绝执行；状态只能由变更流程（`change-apply`）回到 `in_progress`
 17. 非 `active` 需求必须留凭据：`deferred`/`out_of_scope`/`removed` 要有 `reason` + `confirmed_by`，`changed` 要有指向 active 需求的 `superseded_by`
 18. `change-apply` 前 `base_plan_version` / `base_requirement_version` 必须等于当前版本（`0` 也算有效基准）
+19. 节点的 `inputs` 若被某个直接依赖记录为交付物，`start` 前指纹必须未变（否则需 `context_acks` 留档）
 
 ## 八、文件命名约定
 
