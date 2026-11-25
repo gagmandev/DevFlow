@@ -14,8 +14,9 @@ init → analyze → clarify → confirm → plan → [用户审核] → plan-ac
                                               regression → release
 ```
 
-17 个模式：`init` `analyze` `clarify` `confirm` `plan` `board` `status` `next`
-`task` `execute` `sync` `retry` `change` `impact` `regression` `release`。
+17 个核心模式：`init` `analyze` `clarify` `confirm` `plan` `board` `status` `next`
+`task` `execute` `sync` `retry` `change` `impact` `regression` `release` `release-accept`；
+另有 `release-ready` `recover` `migrate` 三个运维入口。
 
 ## 二、七个阶段
 
@@ -91,10 +92,13 @@ regression-check（节点完成度、证据、需求覆盖）
 
 没跑的写 `not_run`。**不要写 passed。**
 
-### 阶段 7 · 交付（release）
+### 阶段 7 · 交付（release → release-ready → release-accept）
 
-`release` 从状态汇总事实（需求、任务、证据、验证分类），人补部署与风险。
-最后一步永远是把报告交给用户确认。
+`release` 从状态汇总事实（需求、任务、证据、验证分类）并检查交付门槛，状态置
+`release_candidate`——**报告生成不等于交付**。`release-ready` 复核门槛后进入
+`release_ready`，最后由用户执行 `release-accept --by` 才变成 `accepted`。
+
+回归结论必须是 `passed`；节点没完成、证据缺失、需求未覆盖，都进不了 `release_ready`。
 
 ## 三、状态在什么时候变
 
@@ -106,8 +110,13 @@ regression-check（节点完成度、证据、需求覆盖）
 | `sync` | `→ needs_review`（证据全）/ `→ failed`（证据不全或测试失败） |
 | `accept` | `needs_review → completed`，下游 `pending → ready` |
 | `block` / `fail` | `→ blocked` / `→ failed` |
-| `retry` | `failed/blocked → in_progress` |
-| `change-apply` | 旧计划 `→ superseded`，新计划 `→ active` |
+| `retry` | `failed/blocked → in_progress`，生成新的 `attempt_id` |
+| `change-apply` | 旧计划 `→ superseded`，新计划 `→ active`（事务提交） |
+| `regression-check` | `→ regression` |
+| `release` | `→ release_candidate`（仅生成报告） |
+| `release-ready` | `release_candidate → release_ready`（门槛通过） |
+| `release-accept` | `release_ready → accepted`（用户确认） |
+| `recover` | 回滚未完成事务，恢复文件到事务前 |
 
 ## 四、示例项目走了一遍
 

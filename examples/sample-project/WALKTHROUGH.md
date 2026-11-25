@@ -204,3 +204,12 @@ python ../../scripts/df.py doctor
 复制 `requirements.md` 到一个空目录，然后 `df.py init` 重新走一遍。
 
 需求方答复在 `clarification.md` 里标注了"演示设定"——真实项目里这些答案来自你的用户。
+
+## 关于 V1.1
+
+这份示例是在 V1 时期跑完的，当时的交付是"生成报告即 `released`"。
+V1.1 起改成三段式（`release_candidate` → `release_ready` → `accepted`），
+示例的 `project.json` 已用 `df.py migrate` 升级为 `accepted`，历史报告与计划没有改动。
+
+如果你想体验 V1.1 的严格门槛，用上面的方式从零跑一遍：
+执行报告必须带 `attempt_id`、验收标准逐条对应、测试统计自洽，越界修改会被 `accept` 拦住。

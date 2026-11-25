@@ -87,13 +87,18 @@ pending → ready → in_progress → needs_review → completed
 
 | 风险 | 措施 |
 | --- | --- |
-| 多个 Agent 同时写计划 | 单写者模型 + `.devflow/.lock` 文件锁 |
+| 多个 Agent 同时写计划 | 单写者模型 + OS 级排他锁（`msvcrt.locking` / `fcntl.flock`），进程崩溃自动释放 |
+| 加锁前读到旧状态 | 所有写命令统一在锁内重新读取 `project.json` 与 `backlog` |
 | 写到一半崩溃 | 临时文件 + `os.fsync` + `os.replace` 原子写 |
+| 多文件提交中途失败 | 快照 + 事务日志 + 回滚；`df.py recover` 处理残留事务 |
 | 看板与 JSON 不一致 | 看板只由 `render_board` 生成，每次状态变更自动重渲染 |
 | 结构写错 | 6 个 Schema + 语义校验，导入时就拦 |
 | 依赖成环 | 导入时检测，有环拒绝 |
-| 证据造假 | 机器读 `test-report.json` + 执行报告证据块，缺一不可 |
+| 证据造假 | 机器读 `test-report.json` + 执行报告证据块；统计自洽、命令退出码、验收逐条对应 |
+| 用旧报告冒充本轮 | `attempt_id` 绑定到执行尝试 |
+| 越界修改 | `files_scope` 规范化匹配，越界进 `scope_violations`，验收阻断 |
 | 历史被覆盖 | 版本化文件 + 返工前归档到 `history/` |
+| 报告被当成交付 | 三段式状态：candidate → ready → accepted |
 
 ## 八、扩展点
 

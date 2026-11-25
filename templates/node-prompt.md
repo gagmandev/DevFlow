@@ -81,6 +81,9 @@
    ```devflow-execution
    {
      "node_id": "{{node_id}}",
+     "attempt_id": "{{attempt_id}}",
+     "plan_version": {{plan_version}},
+     "requirement_version": {{requirement_version}},
      "result": "success",
      "modified_files": ["相对项目根的路径"],
      "acceptance": [{"criterion": "验收标准原文", "met": true, "evidence": "测试名/命令"}],
@@ -88,6 +91,9 @@
      "leftovers": []
    }
    ```
+
+   `attempt_id` 必须与 `start` 输出的一致；`acceptance` 要**逐条**覆盖上面的验收标准，
+   每条都要 `met: true` 且有 `evidence`。缺一条主控就会判失败。
 
 2. `{{test_report_path}}`（机器读）——测试命令、退出码、通过/失败数、用例清单。
 

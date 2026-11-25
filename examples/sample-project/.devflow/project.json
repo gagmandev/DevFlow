@@ -1,11 +1,11 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "project_id": "points-demo",
   "project_name": "积分账户服务",
   "project_type": "greenfield",
-  "status": "released",
+  "status": "accepted",
   "created_at": "2026-11-25T13:38:54+08:00",
-  "updated_at": "2026-11-25T13:50:48+08:00",
+  "updated_at": "2026-11-25T14:31:15+08:00",
   "current_plan_version": 2,
   "current_requirement_version": 2,
   "tech_stack": {

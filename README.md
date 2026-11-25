@@ -1,5 +1,7 @@
 # DevFlow
 
+> 版本 1.1 · 工程可靠性加固版（证据硬校验 / 范围拦截 / 跨进程锁 / 事务提交 / 交付三段式）
+
 把一份需求文档变成**能真正执行到交付**的开发流水线。
 
 不是代码生成器，是流程总控：需求确认 → 任务拆解 → 依赖规划 → 节点提示词 → 执行验收 →
@@ -46,7 +48,32 @@ $DF next
 $DF start DF-001
 # … Agent 按提示词干活，写两份报告 …
 $DF sync DF-001 && $DF accept DF-001
+
+# 全部完成后
+$DF regression-check
+$DF release              # 生成报告 → release_candidate
+$DF release-ready        # 门槛复核 → release_ready
+$DF release-accept --by "我"   # 用户验收 → accepted
 ```
+
+## 工程可靠性（V1.1）
+
+V1 的校验层偏软——多个关键约束只打印警告、不改变状态。V1.1 把这些变成硬约束：
+
+| 风险 | 现在的行为 |
+| --- | --- |
+| 一条测试命令失败、另一条成功 | 判失败（修掉了 `all()` 逻辑漏洞） |
+| 缺 `exit_code` / 空 commands | 判失败，不再默认成功 |
+| `total=0`、统计对不上、用例有 fail | 判失败 |
+| 验收标准没逐条对应 | 判失败 |
+| 用上一轮报告冒充本轮 | `attempt_id` 绑定，对不上即失败 |
+| 改了 `files_scope` 之外的文件 | 记入 `scope_violations`，`accept` 阻断 |
+| 路径 `..` / 绝对路径 / 符号链接逃逸 | 规范化后拒绝 |
+| 两个进程同时改状态 | OS 级排他锁（崩溃自动释放），锁内重读 |
+| change-apply 中途崩溃 | 快照 + 事务日志 + 自动回滚，`df.py recover` |
+| 生成交付报告就被当成已交付 | 三段式：candidate → ready → accepted |
+
+审计报告见 `docs/engineering-audit.md`。
 
 ## 核心设计
 

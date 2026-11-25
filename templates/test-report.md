@@ -2,6 +2,7 @@
 
 - 执行时间：{{executed_at}}
 - 执行者：{{executor}}
+- attempt_id：{{attempt_id}}（必须与执行报告、`start` 输出一致）
 - 结论：passed / failed / partial / not_run
 
 > 机器可读版本在 `test-report.json`，主控按它验收。这份是给人看的明细。

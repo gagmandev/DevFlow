@@ -8,8 +8,16 @@ gates:
     require_tests_passed: true
     require_commands_executed: true
     require_acceptance_evidence: true
-    # 改了 files_scope 之外的文件：warning 只提示，error 阻止验收
-    out_of_scope: warning
+    # 有跳过用例就不能验收（跳过的测试等于没测）
+    require_no_skipped: true
+    # 改了 files_scope 之外的文件：error 阻止验收，warning 只提示
+    out_of_scope: error
+
+  # files_scope 为空时的策略：
+  #   deny  严格模式，没有范围定义就拒绝验收
+  #   warn  提示但放行（兼容旧计划）
+  #   allow 视为不限制
+  empty_scope: warn
 
   coverage:
     # 只有项目本身能统计覆盖率时才打开

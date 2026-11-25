@@ -44,6 +44,39 @@
 
 **没有定位依据就改其他模块，是最危险的操作。**
 
+## 三·五、交付状态机
+
+```
+in_progress ──(全部节点完成)──> regression
+                                    │
+                                    │ release（生成报告 + 查门槛）
+                                    ▼
+                            release_candidate
+                                    │
+                                    │ release-ready（复核门槛）
+                                    ▼
+                             release_ready
+                                    │
+                                    │ release-accept --by <人>
+                                    ▼
+                                accepted
+```
+
+四个状态对应四件事，不能合并：
+
+| 状态 | 含义 | 谁产生 |
+| --- | --- | --- |
+| `regression` | 正在做全量回归 | `regression-check` |
+| `release_candidate` | 交付报告已生成，**未**交付 | `release` |
+| `release_ready` | 交付条件已满足，等待人验收 | `release-ready` |
+| `accepted` | 用户已明确验收 | `release-accept --by` |
+
+`release` 每次都会重新计算门槛：节点完成度、证据齐全、回归结论 `passed`、需求覆盖。
+门槛不过时**仍然生成报告**（便于对照修），但退出码 1，状态停在 `release_candidate`。
+
+回归结论从 `final-report.md` 的 `结论：passed` 行读取。没有结论行、写成 `failed`/`partial`，
+都进不了 `release_ready`。
+
 ## 四、交付报告的诚实原则
 
 必须区分四类，不能混：

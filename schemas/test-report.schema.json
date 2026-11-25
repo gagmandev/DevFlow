@@ -6,6 +6,12 @@
   "required": ["node_id", "status", "executed_at", "commands", "summary"],
   "properties": {
     "node_id": { "type": "string", "pattern": "^DF-[0-9]{3,}$" },
+    "plan_version": { "type": ["integer", "null"], "minimum": 1 },
+    "requirement_version": { "type": ["integer", "null"], "minimum": 1 },
+    "attempt_id": {
+      "type": ["string", "null"],
+      "description": "对应节点 current_attempt_id；防止用旧报告冒充本轮结果"
+    },
     "status": {
       "type": "string",
       "enum": ["passed", "failed", "partial", "not_run"],

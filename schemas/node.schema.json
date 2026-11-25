@@ -96,6 +96,30 @@
     "test_report": { "type": ["string", "null"] },
     "owner": { "type": ["string", "null"] },
     "attempts": { "type": "integer", "minimum": 0, "default": 0 },
+    "current_attempt_id": {
+      "type": ["string", "null"],
+      "description": "本轮执行的唯一标识；执行报告与测试报告必须回填同一个值"
+    },
+    "attempt_number": { "type": ["integer", "null"], "minimum": 1 },
+    "scope_violations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "最近一次同步发现的越界修改；非空时禁止验收"
+    },
+    "scope_waivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason", "at"],
+        "properties": {
+          "reason": { "type": "string" },
+          "at": { "type": "string" },
+          "by": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
+      "description": "主控确认放行的越界记录（必须写理由）"
+    },
     "started_at": { "type": ["string", "null"] },
     "completed_at": { "type": ["string", "null"] },
     "accepted_by": { "type": ["string", "null"] },

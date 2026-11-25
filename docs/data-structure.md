@@ -34,8 +34,12 @@
     ├── regression/
     │   ├── precheck.md                 回归前置检查
     │   └── final-report.md             回归报告
-    └── releases/
-        └── release-report.md           交付报告
+    ├── releases/
+    │   └── release-report.md           交付报告
+    └── .txn/
+        └── <txn_id>/
+            ├── journal.json            事务日志（open/committed/rolled_back）
+            └── files/                  提交前快照（按相对路径保存）
 ```
 
 ## 二、project.json
@@ -46,7 +50,7 @@
 | `project_id` | string | 小写字母数字与 `-`，用于跨文件关联 |
 | `project_name` | string | 展示名 |
 | `project_type` | enum | `greenfield` / `existing` / `refactor` |
-| `status` | enum | `initialized` → `analyzing` → `clarifying` → `requirements_confirmed` → `planned` → `in_progress` → `regression` → `released` |
+| `status` | enum | `initialized` → `analyzing` → `clarifying` → `requirements_confirmed` → `planned` → `in_progress` → `regression` → `release_candidate` → `release_ready` → `accepted`；`released` 是旧版别名，迁移为 `accepted` |
 | `current_plan_version` | int/null | 生效计划版本；空表示还没有 |
 | `current_requirement_version` | int/null | 生效需求基准版本 |
 | `tech_stack` | object | 语言、框架、存储、测试框架 |
@@ -91,6 +95,10 @@
 | `prompt_file` | ✓ | 默认 `.devflow/nodes/<ID>/prompt.md` |
 | `execution_report` / `test_report` | | 为空时按约定路径推导 |
 | `owner` / `attempts` | | 谁在做、尝试了几次 |
+| `current_attempt_id` | | 本轮执行标识；报告必须回填，防止旧报告冒充 |
+| `attempt_number` | | 与 `attempts` 同步，便于人读 |
+| `scope_violations` | | 最近一次同步发现的越界文件；非空禁止验收 |
+| `scope_waivers` | | 主控确认放行的记录（含理由、时间、人） |
 | `started_at` / `completed_at` / `accepted_by` | | 时间线 |
 | `superseded_by` | | 被哪个节点取代 |
 | `blocked_reason` | | 阻塞原因，`blocked` 必填 |
@@ -121,6 +129,9 @@
   "status": "passed",
   "executed_at": "2026-11-25T13:53:00+08:00",
   "executed_by": "code-agent",
+  "attempt_id": "a1b2c3d4e5f6",
+  "plan_version": 1,
+  "requirement_version": 1,
   "commands": [{"cmd": "python -m unittest ...", "exit_code": 0, "output_file": null}],
   "summary": {"total": 17, "passed": 17, "failed": 0, "skipped": 0},
   "coverage": {"tool": "coverage.py", "line": 0.82, "branch": null},
@@ -130,7 +141,12 @@
 }
 ```
 
-验收要求：`status=passed`、`commands` 非空且退出码 0、`summary.failed=0`、`node_id` 对得上。
+验收要求（`strict` = 节点有 `current_attempt_id`）：
+
+- 通用：`status=passed`、`commands` 非空、**每条**命令退出码为 0、`summary.failed=0`、`total>0`
+- `total = passed + failed + skipped`，否则判失败
+- strict：`cases` 数量与 `summary` 一致、`skipped=0`、`attempt_id`/版本号与节点一致
+- 历史报告（无 `attempt_id`）只做通用校验，避免升级后旧报告集体失效
 
 ## 六、不变量
 
@@ -144,6 +160,10 @@
 6. `parallel_group` 内成员之间没有依赖
 7. 节点引用的 `REQ-xxx` 在追踪表里存在
 8. `plan_version` 与文件名一致，`project_id` 与项目档案一致
+9. `needs_review` / `completed` 的节点，`scope_violations` 必须为空
+10. 节点有 `current_attempt_id` 时，两份报告的 `attempt_id` 必须与之一致
+11. 不存在未完成事务（`.txn/*/journal.json` 的 `status` 只能是 `committed` / `rolled_back`）
+12. `project.status = accepted` 只能由 `release-accept` 产生，且此前必须是 `release_ready`
 
 ## 七、文件命名约定
 

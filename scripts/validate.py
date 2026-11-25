@@ -346,6 +346,14 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
         if node.get("parallel_group") and not node.get("parallelizable"):
             report.warn(f"{nid}: 有 parallel_group 但 parallelizable=false")
 
+        if node.get("scope_violations"):
+            report.error(
+                f"{nid}: 存在未处理的越界修改（{len(node['scope_violations'])} 项），不能验收："
+                + "；".join(node["scope_violations"][:3])
+            )
+        if not node.get("files_scope") and node.get("status") not in ("superseded", "cancelled"):
+            report.warn(f"{nid}: 未定义 files_scope，无法校验修改范围（empty_scope 策略决定是否阻断）")
+
         if node.get("no_test") and not node.get("no_test_reason"):
             report.error(f"{nid}: no_test=true 但没有 no_test_reason")
 
@@ -458,7 +466,7 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
     for node in nodes:
         if node.get("status") != "completed":
             continue
-        problems = core.evidence_problems(paths, node, gates)
+        problems = core.evidence_problems(paths, node, gates, plan)
         for problem in problems:
             report.error(problem)
 

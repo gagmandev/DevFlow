@@ -102,9 +102,28 @@ $DF change-apply --change CR-001
 
 ```bash
 $DF regression-check     # 前置检查
-# 真实跑构建与测试，把结果写进 .devflow/regression/final-report.md
-$DF release              # 生成交付报告骨架（事实部分自动填）
+# 真实跑构建与测试，把结果写进 .devflow/regression/final-report.md（要有「结论：passed」行）
+
+$DF release              # 生成交付报告 → release_candidate（报告 ≠ 交付）
+$DF release-ready        # 复核门槛 → release_ready
+$DF release-accept --by "张三"   # 用户验收 → accepted
 ```
+
+`release` 有阻塞时会退出码 1，但报告仍会生成，方便对照修。
+`release-ready` 会重新查一遍，状态可能在这期间变化。
+`accepted` 只能由用户明确执行 `release-accept` 产生。
+
+## 七·五、出错恢复
+
+```bash
+$DF doctor       # 看有没有未完成事务、越界记录、旧状态别名
+$DF recover      # 列出未完成事务及所处阶段
+$DF recover --apply   # 回滚到事务前状态
+$DF migrate      # 升级旧版 project.json（released → accepted）
+```
+
+事务日志在 `.devflow/.txn/<id>/`，快照也在里面。回滚是确定安全的：
+只有全部写完才会标记 `committed`。
 
 ## 八、常见问题
 
@@ -115,8 +134,26 @@ $DF release              # 生成交付报告骨架（事实部分自动填）
 草稿阶段只是警告，激活前必须补齐：`$DF prompt-init --all`，再补实现步骤。
 
 **Q：`accept` 说证据不全？**
-看它列的具体项：缺执行报告、缺 test-report.json、status 不是 passed、命令退出码非 0。
-让执行 Agent 补齐后重新 `sync`。
+看它列的具体项：缺执行报告、缺 test-report.json、status 不是 passed、某条命令退出码非 0、
+统计对不上、验收标准没逐条对应、`attempt_id` 不一致。让执行 Agent 补齐后重新 `sync`。
+
+**Q：`sync` 说"只有 in_progress 能同步"？**
+先 `start`。`start` 会生成 `attempt_id`，没有它就无法区分本轮报告和上一轮的旧报告。
+
+**Q：`accept` 说越界？**
+说明执行报告里的 `modified_files` 有 `files_scope` 之外的文件。三条路：
+撤掉改动 / 更新 `files_scope` 走变更 / `accept --allow-scope --reason "..."` 留档放行。
+
+**Q：`change-apply` 说基准过期？**
+CR 的 `base_plan_version` 与当前计划不一致。说明期间已经有别的变更生效，
+必须基于新计划重新做影响分析，不能直接套旧结论。
+
+**Q：`release` 生成了报告，但状态不是 accepted？**
+这是设计如此。报告只是候选，`release-ready` 检查条件，`release-accept` 才是验收。
+
+**Q：进程被 kill 了，状态会不会坏？**
+写操作有文件锁和原子写，单文件不会半截。多文件提交（change-apply）有事务日志，
+`df.py doctor` 会报出来，`df.py recover --apply` 回滚。
 
 **Q：节点卡住了怎么办？**
 `$DF block DF-003 --reason "..."`，写清缺什么。缺配置/要决策的问题不要靠改代码硬绕。

@@ -51,9 +51,13 @@ $DF status        # 不在 DevFlow 项目内会明确报错
 | "DF-003 做完了" | sync | 读报告与测试证据 → 同步状态 |
 | "验收 DF-003" | accept | 校验证据 → completed → 解锁下游 |
 | "重试 / 卡住了" | retry / block | 分析原因，不要盲目重跑 |
-| "加个需求 / 改规则" | change | 影响分析 → 新版计划 → 用户确认 |
+| "加个需求 / 改规则" | change | 影响分析 → 新版计划 → 用户确认 → 事务提交 |
 | "全部做完了，回归" | regression | 前置检查 → 真实构建与测试 → 报告 |
-| "出交付报告" | release | 汇总需求/任务/证据/限制 |
+| "出交付报告" | release | 汇总需求/任务/证据/限制 → `release_candidate` |
+| "可以交付了吗" | release-ready | 复核门槛 → `release_ready` |
+| "验收通过 / 我确认交付" | release-accept | 记录验收人 → `accepted` |
+| "状态不对 / 崩了" | recover | 查未完成事务 → 回滚 → doctor |
+| "升级旧项目" | migrate | 旧状态别名与 schema 版本升级 |
 
 自然语言就够，不需要用户记命令。但**你**要按上表的流程走。
 
@@ -245,22 +249,47 @@ $DF start DF-003
 ```
 
 ```bash
-$DF sync DF-003        # 读证据 → needs_review 或 failed
+$DF sync DF-003        # 只接受 in_progress → needs_review / failed
 $DF accept DF-003      # 证据齐全才 completed，并自动解锁下游
 ```
 
-验收门槛（`config/quality-gates.yaml` 可调）：
+### 状态约束
 
-- 执行报告存在，且有 `devflow-execution` JSON 块
+`sync` **只允许 `in_progress`**。`pending` / `ready` 必须先 `start`——这不是形式，
+`start` 会生成 `attempt_id`，没有它就无法证明报告属于本轮执行。
+
+`start` 输出一行 `attempt_id=xxxxxxxx`。执行 Agent 必须把同一个值写进
+执行报告证据块和 `test-report.json`；不一致或缺失，`sync` 直接判 failed。
+
+### 验收门槛（`config/quality-gates.yaml` 可调）
+
+- 执行报告存在，且有 `devflow-execution` JSON 块；`result` 必须是 `success`
+- `acceptance` **逐条覆盖**节点的验收标准，每条 `met=true` 且 `evidence` 非空
 - `test-report.json` 存在、`node_id` 对得上、`status=passed`
-- 记录了实际执行的命令且退出码为 0
-- `failed=0`
+- `commands` 非空，**每条**命令都有整数退出码，且**任何一条非 0 就失败**
+- `summary` 自洽：`total = passed + failed + skipped`，`failed=0`，`total>0`
+- `cases` 数量与 `summary` 一致，且没有失败用例
 - `no_test` 节点必须有 `no_test_reason`
+- `modified_files` 必须全部落在 `files_scope` 内
 
 **证据不全就判 failed，不要"先标完成后面补"。** 一旦标完成，下游就会开始动。
 
-如果执行 Agent 是外部的：让它按模板产出这两个文件，放回节点目录，再 `sync`。
-它生成的报告要检查：改了哪些文件（是否越界）、测试命令是否真实、验收项是否逐条对应。
+### 越界修改
+
+`files_scope` 之外的文件改动不会被"警告放过"：
+
+1. `sync` 把越界项写进节点的 `scope_violations`，状态停在 `needs_review`，退出码 1
+2. `accept` 直接拒绝
+3. 三条出路：撤掉改动重新同步 / 更新 `files_scope` 并走变更 / 
+   `accept --allow-scope --reason "为什么必须改"`（会记进 `scope_waivers` 留档）
+
+路径比较是规范化后的：反斜杠、`./`、`..`、绝对路径、符号链接逃逸都会被处理，
+目录匹配要求 `dir/` 前缀，`src/service` 不会放行 `src/service-backup/x.py`。
+
+### 外部 Agent
+
+外部 Agent 也必须先 `start`（主控可以代跑），再按模板产出两个文件。
+不要给它开后门——`sync` 不接受 `pending`/`ready`，也不接受没有 `attempt_id` 的报告。
 
 ## 11. 失败与阻塞
 
@@ -303,10 +332,32 @@ $DF change-new --title "退款冻结积分" --type rule_change
 
 ```bash
 $DF change-set --change CR-001 --patch confirm.json   # status=confirmed
-$DF change-apply --change CR-001                      # 旧计划 superseded，新计划 active
+$DF change-apply --change CR-001                      # 事务提交，旧计划 superseded
 ```
 
 `change-apply` 之前必须让用户确认。确认的是**影响范围和返工清单**，不是"要不要改"。
+
+### 提交是事务
+
+`change-apply` 会依次改：新计划、旧计划、`project.json`、CR 状态、看板。
+这一串是**事务**：
+
+1. 先校验基准版本：CR 的 `base_plan_version` / `base_requirement_version`
+   必须等于当前生效版本，否则**拒绝应用**，要求重新做影响分析
+2. 校验目标计划属于本 CR、需求基准存在、结构校验通过
+3. 快照 + 写事务日志 → 逐个落盘 → 标记 committed
+4. 中途任何异常 → 按快照回滚，项目保持原样，日志留在 `.devflow/.txn/<id>/`
+
+出现半提交（比如进程被 kill）时：
+
+```bash
+$DF recover            # 列出未完成事务与所处阶段
+$DF recover --apply    # 回滚到事务前状态
+$DF doctor             # 复查一致性
+```
+
+**不允许出现两个 active 计划，也不允许 project.json 指向不存在的版本。**
+`doctor` 会检查这一点。
 
 ## 13. regression · 全量回归
 
@@ -336,16 +387,37 @@ $DF regression-check      # 前置检查，有阻塞会退出码 1
 发现问题：定位到需求和节点 → 生成修复任务 → 修 → 重跑受影响的测试 → 更新报告。
 不要在没定位的情况下乱改已完成模块。
 
-## 14. release · 交付
+## 14. release · 交付（三段式）
+
+生成报告、满足条件、用户验收，是**三件事**。不要合并。
 
 ```bash
-$DF release
+$DF release          # 1) 生成交付报告 → release_candidate
+$DF release-ready    # 2) 检查交付条件 → release_ready
+$DF release-accept --by "张三"   # 3) 用户验收 → accepted
 ```
 
-会从状态里汇总：需求完成情况、任务清单、验证状态分类（已验证 / 已实现未验证 / 未实现）。
-生成 `.devflow/releases/release-report.md` 后，你要补：部署步骤、配置清单、已知问题、风险。
+### 1) release
 
-`release` 不替代人验收。最后一步永远是把报告交给用户，让他确认。
+汇总需求完成情况、任务清单、验证状态分类（已验证 / 已实现未验证 / 未实现），
+生成 `.devflow/releases/release-report.md`，状态置为 `release_candidate`。
+
+它**同时**检查交付门槛：节点是否全部完成、证据是否齐全、回归结论是否为 `passed`、
+需求是否都被覆盖。有阻塞就退出码 1，但报告仍然生成（便于对照修）。
+
+注意：`release` **不会**把项目标成已交付。生成报告 ≠ 交付。
+
+### 2) release-ready
+
+再查一遍门槛（状态可能在这期间变化），全部通过才置 `release_ready`。
+这是"可以交给用户验收"的状态，不是"已验收"。
+
+### 3) release-accept
+
+必须带 `--by`，必须处于 `release_ready`。置 `accepted` 并记录验收人和时间。
+
+回归结论从报告里的 `结论：passed` 行读取。没写结论、写成 `failed`/`partial`、
+或者节点没完成，都进不了 `release_ready`。
 
 ## 15. 硬规则
 
@@ -359,6 +431,9 @@ $DF release
 8. 生产部署、生产库变更、`git reset --hard`、批量删除：**必须先问**。
 9. 发现代码现状与计划不一致：先报告，不要静默"顺手修一下"。
 10. 状态变更后看板要重渲染（`df.py` 自动做，手改 JSON 就不会）。
+11. 越界修改不许"警告放过"：要么撤回，要么走变更扩范围，要么显式记录豁免。
+12. 旧报告不能冒充新执行：`attempt_id` 对不上就判失败。
+13. 生成交付报告 ≠ 交付；`accepted` 只能由用户明确验收产生。
 
 ## 16. 文件索引
 

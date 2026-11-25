@@ -53,6 +53,9 @@
 ```devflow-execution
 {
   "node_id": "{{node_id}}",
+  "attempt_id": "从 start 命令输出里复制",
+  "plan_version": 1,
+  "requirement_version": 1,
   "result": "success",
   "modified_files": [],
   "acceptance": [],

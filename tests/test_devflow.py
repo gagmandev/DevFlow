@@ -84,37 +84,78 @@ class TempProject(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def write_reports(self, node_id, node_dir=None, test_status="passed", failed=0):
-        node_dir = node_dir or (self.paths.nodes / node_id)
+    def write_reports(self, node_id, plan=None, test_status="passed", failed=0,
+                      attempt_id="__current__", extra_summary=None, cases=None,
+                      acceptance=None, result="success"):
+        """写一份能通过新门槛的报告。
+
+        attempt_id="__current__" 时自动取节点当前的执行标识；
+        传 None 表示故意不写（用于测试旧报告冒充）。
+        """
+        node_dir = self.paths.nodes / node_id
         node_dir.mkdir(parents=True, exist_ok=True)
+        if plan is None:
+            try:
+                plan = core.load_json(self.paths.backlog(1))
+            except core.DevFlowError:
+                plan = {
+                    "plan_version": 1,
+                    "requirement_version": 1,
+                    "nodes": [minimal_node(node_id, status="needs_review")],
+                }
+        node = next((n for n in plan["nodes"] if n["node_id"] == node_id), None)
+        if node is None:
+            node = minimal_node(node_id, status="needs_review")
+        if attempt_id == "__current__":
+            attempt_id = node.get("current_attempt_id")
+        if acceptance is None:
+            acceptance = [
+                {"criterion": c, "met": True, "evidence": "test_x"}
+                for c in node.get("acceptance_criteria", [])
+            ]
+        evidence = {
+            "node_id": node_id,
+            "result": result,
+            "modified_files": ["a.py"],
+            "acceptance": acceptance,
+            "assumptions": [],
+            "leftovers": [],
+        }
+        if attempt_id:
+            evidence["attempt_id"] = attempt_id
+        evidence["plan_version"] = plan.get("plan_version")
+        evidence["requirement_version"] = plan.get("requirement_version")
+
         (node_dir / "execution-report.md").write_text(
             "# 报告\n\n```devflow-execution\n"
-            + json.dumps(
-                {
-                    "node_id": node_id,
-                    "result": "success",
-                    "modified_files": ["a.py"],
-                    "acceptance": [{"criterion": "命令退出码为 0", "met": True, "evidence": "test_x"}],
-                    "assumptions": [],
-                    "leftovers": [],
-                },
-                ensure_ascii=False,
-            )
+            + json.dumps(evidence, ensure_ascii=False)
             + "\n```\n",
             encoding="utf-8",
         )
+
+        total = 1
+        summary = {"total": total, "passed": total - failed, "failed": failed, "skipped": 0}
+        if extra_summary:
+            summary.update(extra_summary)
+        if cases is None:
+            cases = [
+                {"name": f"case_{i}", "result": "fail" if i < failed else "pass"}
+                for i in range(total)
+            ]
+        report = {
+            "node_id": node_id,
+            "status": test_status,
+            "executed_at": "2026-11-25T10:00:00+08:00",
+            "commands": [{"cmd": "python -m unittest", "exit_code": 0}],
+            "summary": summary,
+            "cases": cases,
+        }
+        if attempt_id:
+            report["attempt_id"] = attempt_id
+        report["plan_version"] = plan.get("plan_version")
+        report["requirement_version"] = plan.get("requirement_version")
         (node_dir / "test-report.json").write_text(
-            json.dumps(
-                {
-                    "node_id": node_id,
-                    "status": test_status,
-                    "executed_at": "2026-11-25T10:00:00+08:00",
-                    "commands": [{"cmd": "python -m unittest", "exit_code": 0}],
-                    "summary": {"total": 1, "passed": 1 - failed, "failed": failed},
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+            json.dumps(report, ensure_ascii=False), encoding="utf-8"
         )
 
 

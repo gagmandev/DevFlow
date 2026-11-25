@@ -7,17 +7,39 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
+import shutil
+import socket
+import threading
 import time
 import unicodedata
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 DF_DIRNAME = ".devflow"
+
+PROJECT_STATUSES = [
+    "initialized",
+    "analyzing",
+    "clarifying",
+    "requirements_confirmed",
+    "planned",
+    "in_progress",
+    "regression",
+    "release_candidate",
+    "release_ready",
+    "accepted",
+    "released",  # 兼容别名，迁移时映射为 accepted
+]
+
+# 旧状态 → 新状态。只在显式迁移或读取时使用，不静默改写用户文件。
+PROJECT_STATUS_MIGRATIONS = {"released": "accepted"}
 
 NODE_STATUSES = [
     "pending",
@@ -118,40 +140,205 @@ def deep_merge(base: dict, patch: dict) -> dict:
     return out
 
 
-@contextmanager
-def locked(df_dir: Path):
-    """跨进程写锁。单写者模型下只需防止并发覆盖。"""
-    df_dir.mkdir(parents=True, exist_ok=True)
-    lock = df_dir / ".lock"
-    acquired = False
-    for _ in range(100):
+# --------------------------------------------------------------------------
+# 跨进程写锁
+# --------------------------------------------------------------------------
+#
+# 用操作系统的排他锁（Windows: msvcrt.locking / POSIX: fcntl.flock），
+# 而不是"锁文件存在即占用"：
+#   - 进程崩溃/被 kill 时，OS 自动释放，不需要靠文件年龄猜陈旧；
+#   - 锁文件本身不删除，避免"删了别人的锁"这类竞态；
+#   - 释放时校验 token，确认自己仍是持有者。
+#
+# 同一进程内可重入（命令内部再调命令不会死锁）。
+
+
+class LockTimeout(DevFlowError):
+    """拿不到锁。"""
+
+
+class ProjectLock:
+    def __init__(self, path: Path, timeout: float | None = None):
+        self.path = Path(path)
+        self.timeout = (
+            float(os.environ.get("DEVFLOW_LOCK_TIMEOUT", "15"))
+            if timeout is None
+            else float(timeout)
+        )
+        self.token = uuid.uuid4().hex
+        self.fd: int | None = None
+        self._locked = False
+
+    # -- 平台相关 ----------------------------------------------------------
+
+    def _try_lock(self, fd: int) -> bool:
         try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            acquired = True
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > 30:  # 陈旧锁
-                try:
-                    lock.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            time.sleep(0.05)
-    if not acquired:
-        raise DevFlowError("无法获取 .devflow/.lock，可能有另一个 DevFlow 进程正在写入")
-    try:
-        yield
-    finally:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def _unlock(self, fd: int) -> None:
         try:
-            lock.unlink()
-        except FileNotFoundError:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
             pass
+
+    # -- 对外 --------------------------------------------------------------
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
+        deadline = time.time() + self.timeout
+        while True:
+            if self._try_lock(self.fd):
+                self._locked = True
+                break
+            if time.time() >= deadline:
+                holder = self._holder_info()
+                os.close(self.fd)
+                self.fd = None
+                raise LockTimeout(
+                    "无法获取 DevFlow 写锁（另一个进程正在修改项目状态）。\n"
+                    f"  锁文件：{self.path}\n"
+                    f"  持有者：{holder}\n"
+                    "  等待超时后退出，未做任何修改。确认没有其他 df.py 在跑，或稍后重试。"
+                )
+            time.sleep(0.05)
+
+        payload = json.dumps(
+            {
+                "token": self.token,
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "acquired_at": now_iso(),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        os.ftruncate(self.fd, 0)
+        os.write(self.fd, payload)
+        os.fsync(self.fd)
+
+    def release(self) -> None:
+        if self.fd is None:
+            return
+        try:
+            owner = self._read_token()
+            if self._locked and owner not in (None, self.token):
+                # 不应该发生：说明文件被外部改写。不动别人的内容，只释放自己的 OS 锁。
+                print(f"! 锁归属异常（期望 {self.token[:8]}，实际 {str(owner)[:8]}），仅释放本进程锁")
+            if self._locked:
+                self._unlock(self.fd)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+            self._locked = False
+
+    def _read_raw(self) -> str | None:
+        """读锁文件内容。
+
+        Windows 的文件锁是强制的：**另一个句柄**连读都会被拒绝。
+        所以优先用自己持有的 fd 读；拿不到时再尝试独立打开。
+        """
+        if self.fd is not None:
+            try:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                return os.read(self.fd, 4096).decode("utf-8", "replace")
+            except OSError:
+                pass
+        try:
+            fd = os.open(str(self.path), os.O_RDONLY)
+        except OSError:
+            return None
+        try:
+            return os.read(fd, 4096).decode("utf-8", "replace")
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+
+    def metadata(self) -> dict:
+        """当前锁文件里记录的持有者信息（诊断用）。"""
+        raw = (self._read_raw() or "").strip()
+        if not raw.startswith("{"):
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    def _read_token(self) -> str | None:
+        raw = (self._read_raw() or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("{"):
+            return self.metadata().get("token")
+        return raw
+
+    def _holder_info(self) -> str:
+        data = self.metadata()
+        if not data:
+            return "未知（可能是刚启动的进程，或 Windows 强制锁导致无法读取）"
+        return f"pid={data.get('pid')} host={data.get('host')} since={data.get('acquired_at')}"
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+
+_LOCKS: dict[str, tuple[ProjectLock, int]] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def project_lock(df_dir: Path, timeout: float | None = None):
+    """进程内可重入 + 跨进程排他的项目写锁。"""
+    key = str(Path(df_dir).resolve())
+    with _LOCKS_GUARD:
+        if key in _LOCKS:
+            lock, depth = _LOCKS[key]
+            _LOCKS[key] = (lock, depth + 1)
+            first = False
+        else:
+            lock = ProjectLock(Path(df_dir) / ".lock", timeout)
+            lock.acquire()
+            _LOCKS[key] = (lock, 1)
+            first = True
+    try:
+        yield lock
+    finally:
+        with _LOCKS_GUARD:
+            lock, depth = _LOCKS[key]
+            if depth > 1:
+                _LOCKS[key] = (lock, depth - 1)
+            else:
+                del _LOCKS[key]
+                lock.release()
+
+
+# 兼容旧调用
+locked = project_lock
 
 
 # --------------------------------------------------------------------------
@@ -328,6 +515,290 @@ def find_root(start: Path | None = None) -> Path:
 
 
 # --------------------------------------------------------------------------
+# 修改范围（files_scope）
+# --------------------------------------------------------------------------
+#
+# files_scope 的每一项可以是：
+#   - 精确文件：      src/service.py
+#   - 目录：          src/service        （匹配 src/service/ 下任意文件）
+#   - 通配符：        src/**/*.py        （** 跨目录，* 不跨目录）
+#
+# 匹配前统一规范化：反斜杠转正斜杠、去掉 ./、拒绝绝对路径与 `..`。
+# 目录匹配要求 `entry + "/"` 前缀，避免 src/service 放行 src/service-backup/x.py。
+
+_ABS_PATH_RE = re.compile(r"^(?:[A-Za-z]:|/|\\\\)")
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
+
+def normalize_rel(raw) -> str:
+    """把用户/Agent 给的路径规范成项目内的相对 POSIX 路径。
+
+    拒绝：空、绝对路径、盘符、UNC、任何 `..` 段。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("路径为空")
+    text = raw.strip().replace("\\", "/")
+    if _ABS_PATH_RE.match(text):
+        raise ValueError("不允许绝对路径")
+    parts = []
+    for seg in text.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            raise ValueError("不允许包含 .. 路径段")
+        parts.append(seg)
+    if not parts:
+        raise ValueError("路径为空")
+    return "/".join(parts)
+
+
+def _glob_to_regex(pattern: str) -> re.Pattern:
+    out = ["^"]
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "*":
+            if pattern[i : i + 2] == "**":
+                if pattern[i : i + 3] == "**/":
+                    out.append("(?:.*/)?")
+                    i += 3
+                    continue
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+            i += 1
+            continue
+        if ch == "?":
+            out.append("[^/]")
+            i += 1
+            continue
+        if ch == "[":
+            end = pattern.find("]", i + 1)
+            if end == -1:
+                out.append(r"\[")
+                i += 1
+                continue
+            out.append(pattern[i : end + 1])
+            i = end + 1
+            continue
+        out.append(re.escape(ch))
+        i += 1
+    out.append("$")
+    return re.compile("".join(out))
+
+
+def scope_match(path: str, entry: str) -> bool:
+    """path 是否落在 scope 项内。两者都应已规范化。"""
+    if _GLOB_CHARS.search(entry):
+        return bool(_glob_to_regex(entry).match(path))
+    entry = entry.rstrip("/")
+    if path == entry:
+        return True
+    return path.startswith(entry + "/")
+
+
+def _symlink_escape(rel: str, root: Path) -> str | None:
+    """检查路径（含其最近的已存在祖先）是否经符号链接跑到项目根之外。"""
+    root_real = Path(os.path.realpath(str(root)))
+    probe = root / rel
+    while not probe.exists() and probe != root:
+        probe = probe.parent
+    if not probe.exists():
+        return None
+    real = Path(os.path.realpath(str(probe)))
+    if os.path.normcase(str(real)) == os.path.normcase(str(root_real)):
+        return None
+    if os.path.normcase(str(root_real)) in os.path.normcase(str(real)):
+        return None
+    return "路径经符号链接逃逸出项目根"
+
+
+def scope_violations(
+    node: dict,
+    modified: list,
+    root: Path,
+    empty_policy: str = "warn",
+) -> list[str]:
+    """返回所有越界原因（空列表=合规）。
+
+    empty_policy：
+      deny  —— 没有 files_scope 就拒绝验收（严格模式）
+      warn  —— 没有 files_scope 时提示，但不阻断（兼容旧计划）
+      allow —— 没有 files_scope 视为不限制
+    """
+    problems: list[str] = []
+    scope = node.get("files_scope") or []
+    if not scope:
+        if empty_policy == "deny":
+            problems.append("节点未定义 files_scope，按策略拒绝验收")
+        elif empty_policy == "warn" and modified:
+            problems.append("节点未定义 files_scope，无法校验修改范围")
+        return problems
+
+    entries = []
+    for entry in scope:
+        try:
+            entries.append(normalize_rel(entry))
+        except ValueError as exc:
+            problems.append(f"files_scope 项 {entry!r} 非法：{exc}")
+
+    for raw in modified:
+        try:
+            rel = normalize_rel(raw)
+        except ValueError as exc:
+            problems.append(f"{raw!r}: {exc}")
+            continue
+        escaped = _symlink_escape(rel, root)
+        if escaped:
+            problems.append(f"{rel}: {escaped}")
+            continue
+        if not any(scope_match(rel, entry) for entry in entries):
+            problems.append(f"{rel}: 不在 files_scope 内")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# 轻量事务（多文件原子提交）
+# --------------------------------------------------------------------------
+
+
+class Transaction:
+    """快照 + 日志 + 回滚。用于 change-apply 这类跨文件提交。
+
+    提交顺序：快照 → 写日志 → 改文件 → 标记 committed。
+    任何一步失败都可以按快照回滚；committed 之后不再回滚。
+    """
+
+    def __init__(self, paths: "Paths", name: str, files: list[Path], meta: dict | None = None):
+        self.paths = paths
+        self.name = name
+        self.files = [Path(f) for f in files]
+        self.meta = meta or {}
+        self.txn_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        self.dir = paths.df / ".txn" / self.txn_id
+        self.journal_path = self.dir / "journal.json"
+        self.journal: dict = {}
+
+    # -- 内部 --------------------------------------------------------------
+
+    def _write_journal(self) -> None:
+        self.journal["updated_at"] = now_iso()
+        atomic_write_json(self.journal_path, self.journal)
+
+    def _snapshot_path(self, rel: str) -> Path:
+        return self.dir / "files" / rel
+
+    # -- 生命周期 ----------------------------------------------------------
+
+    def begin(self) -> "Transaction":
+        self.dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for path in self.files:
+            rel = self.paths.rel(path)
+            existed = path.exists()
+            entries.append({"path": rel, "existed": existed})
+            if existed:
+                target = self._snapshot_path(rel)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+        self.journal = {
+            "txn_id": self.txn_id,
+            "name": self.name,
+            "status": "open",
+            "phase": "snapshot",
+            "created_at": now_iso(),
+            "files": entries,
+            "meta": self.meta,
+        }
+        self._write_journal()
+        return self
+
+    def phase(self, name: str) -> None:
+        self.journal["phase"] = name
+        self._write_journal()
+
+    def commit(self) -> None:
+        self.journal["status"] = "committed"
+        self.journal["phase"] = "done"
+        self.journal["committed_at"] = now_iso()
+        self._write_journal()
+
+    def rollback(self, reason: str = "") -> list[str]:
+        restored = []
+        for entry in self.journal.get("files", []):
+            rel = entry["path"]
+            target = self.paths.root / rel
+            if entry.get("existed"):
+                snap = self._snapshot_path(rel)
+                if snap.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(snap, target)
+                    restored.append(rel)
+            else:
+                if target.exists():
+                    target.unlink()
+                    restored.append(f"{rel}（删除）")
+        self.journal["status"] = "rolled_back"
+        self.journal["phase"] = "rolled_back"
+        self.journal["rollback_reason"] = reason
+        self._write_journal()
+        return restored
+
+
+def pending_transactions(paths: "Paths") -> list[dict]:
+    root = paths.df / ".txn"
+    if not root.exists():
+        return []
+    out = []
+    for journal in sorted(root.glob("*/journal.json")):
+        try:
+            data = load_json(journal)
+        except DevFlowError:
+            continue
+        if data.get("status") in ("open", "failed"):
+            data["_dir"] = journal.parent
+            out.append(data)
+    return out
+
+
+def load_transaction(paths: "Paths", txn_id: str) -> Transaction:
+    journal_path = paths.df / ".txn" / txn_id / "journal.json"
+    if not journal_path.exists():
+        raise DevFlowError(f"事务不存在：{txn_id}")
+    data = load_json(journal_path)
+    files = [paths.root / entry["path"] for entry in data.get("files", [])]
+    txn = Transaction(paths, data.get("name", "unknown"), files, data.get("meta"))
+    txn.txn_id = txn_id
+    txn.dir = journal_path.parent
+    txn.journal_path = journal_path
+    txn.journal = data
+    return txn
+
+
+def prune_transactions(paths: "Paths", keep: int = 20) -> None:
+    root = paths.df / ".txn"
+    if not root.exists():
+        return
+    dirs = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name)
+    for old in dirs[:-keep] if len(dirs) > keep else []:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def migrate_project_data(data: dict) -> list[str]:
+    """把旧版 project.json 就地升级，返回变更说明。"""
+    changes = []
+    status = data.get("status")
+    if status in PROJECT_STATUS_MIGRATIONS:
+        data["status"] = PROJECT_STATUS_MIGRATIONS[status]
+        changes.append(f"status: {status} → {data['status']}")
+    if data.get("schema_version") != SCHEMA_VERSION:
+        changes.append(f"schema_version: {data.get('schema_version')} → {SCHEMA_VERSION}")
+        data["schema_version"] = SCHEMA_VERSION
+    return changes
+
+
+# --------------------------------------------------------------------------
 # 项目与计划
 # --------------------------------------------------------------------------
 
@@ -340,6 +811,14 @@ class Project:
     @property
     def root(self) -> Path:
         return self.paths.root
+
+    def reload(self) -> "Project":
+        """加锁后重新读取，避免用加锁前的旧快照覆盖别人的修改。"""
+        self.data = load_json(self.paths.project)
+        return self
+
+    def effective_status(self) -> str:
+        return PROJECT_STATUS_MIGRATIONS.get(self.data.get("status"), self.data.get("status"))
 
     def save(self) -> None:
         self.data["updated_at"] = now_iso()
@@ -549,12 +1028,154 @@ def load_test_report(paths: Paths, node: dict) -> dict | None:
     return load_json(path)
 
 
-def evidence_problems(paths: Paths, node: dict, gates: dict | None = None) -> list[str]:
-    """验收门槛：返回阻止 completed 的问题列表（空列表=可验收）。"""
+def _int_or_none(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _binding_problems(problems: list[str], label: str, data: dict, node: dict, plan: dict | None) -> None:
+    """版本与执行尝试绑定。
+
+    只有节点带 current_attempt_id（新一次执行）时才强制要求，
+    避免历史报告因为新增字段集体失效。
+    """
+    strict = bool(node.get("current_attempt_id"))
+    if not strict:
+        return
+    if plan is not None:
+        if data.get("plan_version") is None:
+            problems.append(f"{label} 缺少 plan_version，无法确认属于当前计划 v{plan.get('plan_version')}")
+        elif data.get("plan_version") != plan.get("plan_version"):
+            problems.append(
+                f"{label} 的 plan_version={data.get('plan_version')}，"
+                f"当前计划是 v{plan.get('plan_version')}"
+            )
+        if data.get("requirement_version") is None:
+            problems.append(f"{label} 缺少 requirement_version")
+        elif data.get("requirement_version") != plan.get("requirement_version"):
+            problems.append(
+                f"{label} 的 requirement_version={data.get('requirement_version')}，"
+                f"当前需求是 v{plan.get('requirement_version')}"
+            )
+    if data.get("attempt_id") is None:
+        problems.append(
+            f"{label} 缺少 attempt_id，无法证明是本轮执行产出的证据"
+            f"（当前 {node['current_attempt_id']}）"
+        )
+    elif data.get("attempt_id") != node["current_attempt_id"]:
+        problems.append(
+            f"{label} 的 attempt_id={data.get('attempt_id')} 与当前执行 "
+            f"{node['current_attempt_id']} 不一致（可能是上一轮的旧报告）"
+        )
+
+
+def _acceptance_problems(problems: list[str], node: dict, evidence: dict) -> None:
+    declared = [str(c).strip() for c in node.get("acceptance_criteria", [])]
+    reported = evidence.get("acceptance")
+    index = {}
+    if isinstance(reported, list):
+        for item in reported:
+            if isinstance(item, dict) and isinstance(item.get("criterion"), str):
+                index[item["criterion"].strip()] = item
+    for criterion in declared:
+        item = index.get(criterion)
+        if item is None:
+            problems.append(f"验收标准未在报告中逐条对应：{criterion}")
+            continue
+        if item.get("met") is not True:
+            problems.append(f"验收标准未满足（met 不为 true）：{criterion}")
+        if not str(item.get("evidence") or "").strip():
+            problems.append(f"验收标准缺少证据：{criterion}")
+
+
+def _command_problems(problems: list[str], node_id: str, report: dict) -> None:
+    commands = report.get("commands")
+    if not isinstance(commands, list) or not commands:
+        problems.append(f"{node_id} 测试报告没有记录任何实际执行的命令")
+        return
+    for idx, item in enumerate(commands, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"{node_id} 第 {idx} 条命令格式不对")
+            continue
+        if not str(item.get("cmd") or "").strip():
+            problems.append(f"{node_id} 第 {idx} 条命令缺少 cmd")
+        code = _int_or_none(item.get("exit_code"))
+        if code is None:
+            problems.append(f"{node_id} 第 {idx} 条命令没有明确的整数退出码（不允许默认成功）")
+        elif code != 0:
+            problems.append(f"{node_id} 第 {idx} 条命令退出码 {code}：{str(item.get('cmd'))[:60]}")
+
+
+def _summary_problems(problems: list[str], node_id: str, report: dict, gates: dict, strict: bool) -> None:
+    summary = report.get("summary")
+    if not isinstance(summary, dict):
+        problems.append(f"{node_id} 测试报告缺少 summary")
+        return
+    total = _int_or_none(summary.get("total"))
+    passed = _int_or_none(summary.get("passed"))
+    failed = _int_or_none(summary.get("failed"))
+    skipped = _int_or_none(summary.get("skipped", 0))
+    if None in (total, passed, failed, skipped):
+        problems.append(f"{node_id} summary 的 total/passed/failed/skipped 必须是整数")
+        return
+    if failed != 0:
+        problems.append(f"{node_id} 测试报告里 failed={failed}")
+    if total == 0:
+        problems.append(f"{node_id} 测试总数为 0，不能宣称测试通过")
+    if total != passed + failed + skipped:
+        problems.append(
+            f"{node_id} summary 统计不一致：total={total} ≠ "
+            f"passed({passed}) + failed({failed}) + skipped({skipped})"
+        )
+    if skipped and strict and gates.get("require_no_skipped", True):
+        problems.append(f"{node_id} 有 {skipped} 条用例被跳过，质量门槛要求全部执行")
+
+    cases = report.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return
+    counts = {"pass": 0, "fail": 0, "skip": 0}
+    for case in cases:
+        if not isinstance(case, dict):
+            problems.append(f"{node_id} cases 里存在非对象项")
+            continue
+        result = case.get("result")
+        if result not in counts:
+            problems.append(f"{node_id} 用例 {case.get('name')!r} 的 result={result!r} 不合法")
+            continue
+        counts[result] += 1
+    if counts["fail"]:
+        problems.append(f"{node_id} cases 里有 {counts['fail']} 条失败用例")
+    if report.get("status") == "passed" and counts["fail"]:
+        problems.append(f"{node_id} status=passed 但 cases 里有失败用例")
+    if not strict:
+        # 旧格式报告：cases 可能只列本节点新增用例，与 summary.total（全量）不可比
+        return
+    if len(cases) != total:
+        problems.append(f"{node_id} cases 数量 {len(cases)} 与 summary.total={total} 不一致")
+    if counts["pass"] != passed or counts["fail"] != failed or counts["skip"] != skipped:
+        problems.append(
+            f"{node_id} cases 统计（pass={counts['pass']}, fail={counts['fail']}, "
+            f"skip={counts['skip']}）与 summary 不一致"
+        )
+
+
+def evidence_problems(
+    paths: Paths,
+    node: dict,
+    gates: dict | None = None,
+    plan: dict | None = None,
+) -> list[str]:
+    """验收门槛：返回阻止 completed 的问题列表（空列表=可验收）。
+
+    原则：**没有证据就是没做**。缺字段不补默认值，一律判失败。
+    """
     gates = (gates or {}).get("gates", {}).get("node_accept", {})
     problems: list[str] = []
     node_id = node["node_id"]
+    # 新一次执行（有 attempt_id）走全量校验；历史节点只做基本校验，
+    # 避免升级后旧报告集体失效（兼容性要求）。
+    strict = bool(node.get("current_attempt_id"))
 
+    # ---- 执行报告 ----
     if gates.get("require_execution_report", True):
         path = report_path(paths, node, "execution_report")
         if not path.exists():
@@ -566,18 +1187,29 @@ def evidence_problems(paths: Paths, node: dict, gates: dict | None = None) -> li
                     f"{node_id} 的执行报告里没有 ```devflow-execution 证据块，无法核实改动与测试"
                 )
             else:
-                if evidence.get("node_id") not in (None, node_id):
+                if evidence.get("node_id") != node_id:
                     problems.append(
-                        f"{node_id} 执行报告证据块的 node_id 是 {evidence.get('node_id')}"
+                        f"{node_id} 执行报告证据块的 node_id 是 {evidence.get('node_id')!r}，对不上"
                     )
-                if evidence.get("result") == "blocked":
-                    problems.append(f"{node_id} 执行报告标记为 blocked，不能验收")
+                result = evidence.get("result")
+                if result != "success":
+                    problems.append(
+                        f"{node_id} 执行报告 result={result!r}，只有 success 才能进入验收"
+                    )
+                _binding_problems(problems, "执行报告", evidence, node, plan)
+                if gates.get("require_acceptance_evidence", True) and strict:
+                    _acceptance_problems(problems, node, evidence)
+                modified = evidence.get("modified_files")
+                if modified is not None and not isinstance(modified, list):
+                    problems.append(f"{node_id} 执行报告的 modified_files 必须是数组")
 
+    # ---- 无测试节点 ----
     if node.get("no_test"):
         if not node.get("no_test_reason"):
             problems.append(f"{node_id} 标记了 no_test 但没有写 no_test_reason")
         return problems
 
+    # ---- 测试报告 ----
     report = load_test_report(paths, node)
     if report is None:
         if gates.get("require_test_report", True):
@@ -586,23 +1218,19 @@ def evidence_problems(paths: Paths, node: dict, gates: dict | None = None) -> li
 
     if report.get("node_id") != node_id:
         problems.append(
-            f"{node_id} 的 test-report.json 里 node_id 是 {report.get('node_id')}，对不上"
+            f"{node_id} 的 test-report.json 里 node_id 是 {report.get('node_id')!r}，对不上"
         )
 
     status = report.get("status")
     if gates.get("require_tests_passed", True) and status != "passed":
         problems.append(f"{node_id} 测试状态是 {status}，只有 passed 才能验收")
 
-    if gates.get("require_commands_executed", True):
-        commands = report.get("commands") or []
-        if not commands:
-            problems.append(f"{node_id} 测试报告没有记录任何实际执行的命令")
-        elif all(int(c.get("exit_code", 0)) != 0 for c in commands):
-            problems.append(f"{node_id} 记录的命令全部非零退出，不能算通过")
+    _binding_problems(problems, "测试报告", report, node, plan)
 
-    summary = report.get("summary") or {}
-    if summary.get("failed", 0) > 0:
-        problems.append(f"{node_id} 测试报告里 failed={summary.get('failed')}")
+    if gates.get("require_commands_executed", True):
+        _command_problems(problems, node_id, report)
+
+    _summary_problems(problems, node_id, report, gates, strict)
     return problems
 
 
@@ -640,14 +1268,23 @@ def load_execution_evidence(paths: Paths, node: dict) -> dict | None:
     return parse_execution_evidence(read_text(path))
 
 
-def out_of_scope_files(node: dict, modified: list[str]) -> list[str]:
-    """执行报告里改了但不在 files_scope 内的文件（只做提示）。"""
-    scope = [s.replace("\\", "/").rstrip("/").lstrip("./") for s in node.get("files_scope", [])]
+def out_of_scope_files(node: dict, modified: list) -> list[str]:
+    """兼容旧接口：返回越界文件（只做展示，验收请用 scope_violations）。"""
+    scope = []
+    for entry in node.get("files_scope") or []:
+        try:
+            scope.append(normalize_rel(entry))
+        except ValueError:
+            continue
     if not scope:
         return []
     outs = []
     for item in modified:
-        norm = str(item).replace("\\", "/").lstrip("./")
-        if not any(norm == s or norm.startswith(s + "/") for s in scope):
-            outs.append(norm)
+        try:
+            rel = normalize_rel(item)
+        except ValueError:
+            outs.append(str(item))
+            continue
+        if not any(scope_match(rel, entry) for entry in scope):
+            outs.append(rel)
     return outs

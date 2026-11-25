@@ -33,8 +33,12 @@
         "planned",
         "in_progress",
         "regression",
+        "release_candidate",
+        "release_ready",
+        "accepted",
         "released"
-      ]
+      ],
+      "description": "release_candidate=交付报告已生成；release_ready=交付条件满足；accepted=用户已验收。released 为旧版别名，迁移为 accepted"
     },
     "created_at": { "type": "string" },
     "updated_at": { "type": "string" },
