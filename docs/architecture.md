@@ -50,15 +50,15 @@ Agent 的对话记忆不可靠：换会话就丢，长对话会截断，并行�
 ```
 SKILL.md              主控指令：模式路由 + 每步怎么做
 config/               可调规则（阈值、门槛、阶段定义）
-schemas/              6 个 JSON Schema，结构校验的唯一依据
-templates/            10 个文档模板（需求、提示词、报告、变更、交付）
-references/           7 篇方法论文档（拆解、依赖、测试、变更……）
-scripts/
-  dfcore.py           核心库：路径、原子 IO、配置、状态机、证据校验
-  df.py               CLI：init / status / next / start / sync / accept / change / release
-  validate.py         JSON Schema 子集校验 + 语义校验（环、依赖、状态、覆盖）
+  schemas/              7 个 JSON Schema，结构校验的唯一依据
+  templates/            11 个文档模板（需求、提示词、报告、变更、回归、交付）
+  references/           7 篇方法论文档（拆解、依赖、测试、变更……）
+  scripts/
+  dfcore.py           核心库：路径、原子 IO、配置、状态机、证据校验、Git 核对、并行冲突
+  df.py               CLI：init / status / next / start / sync / accept / change / regression / release
+  validate.py         JSON Schema 子集校验 + 语义校验（环、依赖、状态、覆盖、并行冲突）
   render_board.py     JSON → Markdown 看板
-  dependency_check.py 环检测、分层、关键路径、不可达节点
+  dependency_check.py 环检测、分层、并行组安全、关键路径、不可达节点
 examples/sample-project/  真实跑通的示例（含完整 .devflow 与真实测试）
 docs/                 本目录
 ```

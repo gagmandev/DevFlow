@@ -37,9 +37,12 @@
           "priority": { "type": "string", "enum": ["must", "should", "could", "wont"] },
           "status": {
             "type": "string",
-            "enum": ["active", "changed", "removed", "deferred"],
-            "description": "changed/removed 只在需求变更时使用，旧条目保留"
+            "enum": ["active", "changed", "removed", "deferred", "out_of_scope"],
+            "description": "非 active 状态必须有 reason 与 confirmed_by，防止用改状态绕过覆盖检查"
           },
+          "reason": { "type": "string", "description": "为什么 deferred / out_of_scope / removed" },
+          "confirmed_by": { "type": ["string", "null"], "description": "谁确认了范围调整" },
+          "confirmed_at": { "type": ["string", "null"] },
           "statement": { "type": "string" },
           "source": { "type": "string", "description": "来源：文件名+章节/页码/图号" },
           "acceptance": { "type": "array", "items": { "type": "string" } },

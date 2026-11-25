@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "devflow/regression-report.schema.json",
+  "title": "DevFlow 全量回归报告（final-report.json）",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "plan_version",
+    "requirement_version",
+    "status",
+    "executed_at",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "plan_version": { "type": "integer", "minimum": 1 },
+    "requirement_version": { "type": "integer", "minimum": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "not_run"],
+      "description": "必须与 checks 推导结果一致：任一必需项 failed → failed；必需项未执行 → not_run"
+    },
+    "executed_at": { "type": "string" },
+    "executed_by": { "type": ["string", "null"] },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["check_id", "name", "required", "status"],
+        "properties": {
+          "check_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" },
+          "status": {
+            "type": "string",
+            "enum": ["passed", "failed", "not_run", "skipped"]
+          },
+          "command": { "type": ["string", "null"] },
+          "exit_code": { "type": ["integer", "null"] },
+          "executed_at": { "type": ["string", "null"] },
+          "evidence": { "type": ["string", "null"] },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -27,6 +27,37 @@
 | 8 | 数据库脚本 | 能正向执行，回滚有说明 |
 | 9 | 需求验收项 | 逐条对照需求基准 |
 
+## 二·五、回归报告必须是机器可读的
+
+Markdown 是给人看的，不能作为交付依据——"报告存在"和"测试通过"是两件事。
+
+`regression/final-report.json` 是事实来源，每个检查项至少包含：
+`check_id` / `name` / `required` / `status` / `command` / `exit_code` / `executed_at` /
+`evidence` / `notes`。
+
+| 状态 | 含义 | 要求 |
+| --- | --- | --- |
+| `passed` | 实际执行并通过 | 必须有命令、退出码 0、证据 |
+| `failed` | 执行了但失败 | 必须写原因 |
+| `not_run` | 没执行 | 必须写原因，且不能算通过 |
+| `skipped` | 不适用 | 必须写原因 |
+
+整体状态由检查项推导，不能自己填：
+
+```
+任一必需项 failed            → failed
+任一必需项 not_run / skipped → not_run
+全部必需项 passed            → passed
+```
+
+声明值与推导值不一致，`regression-import` 直接拒绝。
+
+`config/quality-gates.yaml` 的 `required_checks` 列出必须存在的检查项；
+缺项等于"没检查"，拒绝导入。不适用的项要显式 `skipped` + 原因，不能直接省略。
+
+`release` 读 JSON 并重新校验，不看 Markdown 的措辞。旧项目只有 Markdown 时，
+`release --legacy-regression` 是明确的降级开关，会在项目档案里留痕。
+
 ## 三、问题定位
 
 发现问题时，不要直接改代码。先定位：
@@ -74,8 +105,12 @@ in_progress ──(全部节点完成)──> regression
 `release` 每次都会重新计算门槛：节点完成度、证据齐全、回归结论 `passed`、需求覆盖。
 门槛不过时**仍然生成报告**（便于对照修），但退出码 1，状态停在 `release_candidate`。
 
-回归结论从 `final-report.md` 的 `结论：passed` 行读取。没有结论行、写成 `failed`/`partial`，
-都进不了 `release_ready`。
+回归结论从 `final-report.json` 读取（旧项目可加 `--legacy-regression` 读 Markdown 的
+`结论：passed` 行）。没有结论行、写成 `failed`，或者必需检查项没跑，都进不了 `release_ready`。
+
+**`accepted` 是终态。** 到达之后 `start` / `sync` / `accept` / `retry` / `regression-check` /
+`release` / `release-ready` 全部拒绝执行（退出码 2），`regression-check` 也不能把状态改回
+`regression`。要继续开发只能走变更：`change-new` → `change-apply`（新计划 + 状态回 `in_progress`）。
 
 ## 四、交付报告的诚实原则
 

@@ -99,6 +99,12 @@
 | `attempt_number` | | 与 `attempts` 同步，便于人读 |
 | `scope_violations` | | 最近一次同步发现的越界文件；非空禁止验收 |
 | `scope_waivers` | | 主控确认放行的记录（含理由、时间、人） |
+| `prompt_version` | | 提示词版本；每次 `prompt-init` 递增 |
+| `git_baseline` | | `start` 时的 HEAD 与已有未提交文件 |
+| `git_actual_changes` | | `sync` 检测到的实际变更（已排除执行前的修改） |
+| `git_discrepancies` | | 实际变更与 `modified_files` 的差异 |
+| `git_waivers` | | 确认 Git 差异的记录 |
+| `db_objects` / `api_contracts` / `shared_config` | | 并行冲突检测用；同组不允许交集 |
 | `started_at` / `completed_at` / `accepted_by` | | 时间线 |
 | `superseded_by` | | 被哪个节点取代 |
 | `blocked_reason` | | 阻塞原因，`blocked` 必填 |
@@ -148,7 +154,43 @@
 - strict：`cases` 数量与 `summary` 一致、`skipped=0`、`attempt_id`/版本号与节点一致
 - 历史报告（无 `attempt_id`）只做通用校验，避免升级后旧报告集体失效
 
-## 六、不变量
+## 六、回归报告（regression/final-report.json）
+
+```json
+{
+  "schema_version": "1.0",
+  "plan_version": 2,
+  "requirement_version": 2,
+  "status": "passed",
+  "executed_at": "2026-11-25T15:00:00+08:00",
+  "executed_by": "code-agent",
+  "checks": [
+    {
+      "check_id": "unit_test",
+      "name": "单元测试",
+      "required": true,
+      "status": "passed",
+      "command": "python -m unittest discover -s tests",
+      "exit_code": 0,
+      "executed_at": "2026-11-25T15:01:00+08:00",
+      "evidence": "Ran 74 tests / OK",
+      "notes": ""
+    }
+  ],
+  "notes": ""
+}
+```
+
+- `status` 必须等于检查项推导结果（`derive_regression_status`）
+- 必需项（`required=true`）任一 `failed` → 整体 `failed`
+- 必需项任一 `not_run`/`skipped` → 整体不能是 `passed`
+- `passed` 项必须有命令、`exit_code=0`、证据
+- `not_run`/`skipped` 必须写 `notes`
+- `config/quality-gates.yaml` 的 `required_checks` 决定哪些 check_id 必须存在
+
+Markdown 由 `regression-import` 从 JSON 渲染，不手工维护。
+
+## 七、不变量
 
 这些必须永远成立，`validate.py` 会检查：
 
@@ -164,8 +206,14 @@
 10. 节点有 `current_attempt_id` 时，两份报告的 `attempt_id` 必须与之一致
 11. 不存在未完成事务（`.txn/*/journal.json` 的 `status` 只能是 `committed` / `rolled_back`）
 12. `project.status = accepted` 只能由 `release-accept` 产生，且此前必须是 `release_ready`
+13. 未完成节点的提示词元数据必须与 `project_id` / `plan_version` / `requirement_version` 一致
+14. 同一 `parallel_group` 内不存在依赖、文件重叠或 `db_objects`/`api_contracts`/`shared_config` 交集（除非有 `parallel_exceptions`）
+15. `release_ready` 之前 `regression/final-report.json` 必须存在且推导为 `passed`
+16. `accepted` 之后节点类与交付类命令全部拒绝执行；状态只能由变更流程（`change-apply`）回到 `in_progress`
+17. 非 `active` 需求必须留凭据：`deferred`/`out_of_scope`/`removed` 要有 `reason` + `confirmed_by`，`changed` 要有指向 active 需求的 `superseded_by`
+18. `change-apply` 前 `base_plan_version` / `base_requirement_version` 必须等于当前版本（`0` 也算有效基准）
 
-## 七、文件命名约定
+## 八、文件命名约定
 
 | 类型 | 规则 |
 | --- | --- |
@@ -175,7 +223,7 @@
 | 变更 | `CR-001` 目录，ID 不复用 |
 | 归档 | `history/<原名>.<时间戳>.<扩展名>` |
 
-## 八、Git 建议
+## 九、Git 建议
 
 提交：`.devflow/` 下除锁文件外的全部内容。
 忽略：`.devflow/.lock`、`.devflow/**/*.tmp`（`init` 会自动写进 `.gitignore`）。

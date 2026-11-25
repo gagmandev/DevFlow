@@ -178,11 +178,39 @@ $DF req-confirm --version 1
 
 拿不准会不会冲突，就不要标并行。串行只是慢一点，冲突要重做。
 
+**校验器会拦这些**（不是提醒）：同组直接依赖、**间接依赖**（A→B→C，A 和 C 同组）、
+`files_scope` 重叠、`db_objects` 撞同一张表、`api_contracts` 撞同一个接口、
+`shared_config` 撞同一个配置项。确认安全必须显式写例外：
+
+```json
+"parallel_exceptions": [
+  {"group": "A", "reason": "两块代码互不影响，已评审", "approved_by": "架构师"}
+]
+```
+
+拓扑分层只是"可以并行的候选"，不代表代码修改安全。别把同层节点直接塞进一个组。
+
 ### 7.4 生成提示词
 
 ```bash
 $DF prompt-init --all --plan 1        # 生成骨架（自动填需求/依赖/范围/验收/测试）
 ```
+
+提示词开头会写一段版本元数据：
+
+```
+---
+project_id: points-demo
+node_id: DF-004
+plan_version: 1
+requirement_version: 1
+prompt_version: 3
+generated_at: ...
+---
+```
+
+`start` 会核对这五项。计划或需求变了，旧提示词直接拒绝执行，必须
+`prompt-init <ID> --force` 重新生成。历史提示词不覆盖（版本号递增，文件本身可回溯）。
 
 然后**手工补「实现步骤」**：具体到先写哪个文件、方法签名、边界怎么处理。
 生成器只能填结构化字段，填不了实现思路。
@@ -289,7 +317,26 @@ $DF accept DF-003      # 证据齐全才 completed，并自动解锁下游
 ### 外部 Agent
 
 外部 Agent 也必须先 `start`（主控可以代跑），再按模板产出两个文件。
-不要给它开后门——`sync` 不接受 `pending`/`ready`，也不接受没有 `attempt_id` 的报告。
+把报告放进任意目录后：
+
+```bash
+$DF sync DF-003 --external --from /path/to/reports
+```
+
+它会先校验 `node_id` / `attempt_id` 再把文件搬进节点目录，然后走**同一套**证据、
+依赖、范围、Git 校验。没有"外部报告免检"这回事。
+
+### Git 变更核对（可选）
+
+`start` 会记录 Git 基准：HEAD + **执行前就存在的未提交文件**。
+`sync` 时计算实际变更，并减掉这些已有修改——用户原来就改了一半的文件，不能算到这个节点头上。
+
+报告里的 `modified_files` 与实际情况不一致时会记录到 `git_discrepancies`：
+
+- `verify_changes: warn`（默认）→ 提示，验收前人工看
+- `verify_changes: error` → 阻止验收，确认后用 `accept --ack-changes --reason "..."` 留档
+
+项目不是 git 仓库、或项目目录不是仓库根时自动降级，不阻断流程。
 
 ## 11. 失败与阻塞
 
@@ -348,6 +395,14 @@ $DF change-apply --change CR-001                      # 事务提交，旧计划
 3. 快照 + 写事务日志 → 逐个落盘 → 标记 committed
 4. 中途任何异常 → 按快照回滚，项目保持原样，日志留在 `.devflow/.txn/<id>/`
 
+应用前还会检查**节点迁移关系**：
+
+- 旧节点不能凭空消失（不需要就显式 `superseded`）
+- 已完成的节点被返工，`remark` 必须写明是哪个 CR 触发的
+- 新计划里不能凭空出现 `completed` 节点
+
+这些不满足就拒绝应用——不是"提醒一下"。
+
 出现半提交（比如进程被 kill）时：
 
 ```bash
@@ -365,7 +420,17 @@ $DF doctor             # 复查一致性
 $DF regression-check      # 前置检查，有阻塞会退出码 1
 ```
 
-检查：有没有未完成/阻塞/待验收节点、证据是否齐全、需求是否都被覆盖。
+前置检查会**阻断**（不是警告）这些情况：
+
+- 还有 pending / ready / in_progress / needs_review / blocked / failed 节点
+- 已完成节点证据不齐（走同一套 `evidence_problems`）
+- active 需求没有任何节点覆盖，或覆盖节点都没完成
+- 需求只有 `no_test` 节点覆盖（缺可执行验证）
+- 需求的验收项在覆盖节点报告里找不到 `met=true` 且带证据的记录（"代码写了"不等于"验证过"）
+- 需求被改成 `deferred` / `out_of_scope` / `removed`，但没有 `reason` 和 `confirmed_by`
+- 需求被改成 `changed`，但没有 `superseded_by`，或替代需求不存在 / 不是 active
+
+把需求改成非 active 不是逃生门——必须写清原因和谁确认的，`changed` 必须指向真正的替代需求。
 
 然后**真的去跑**：
 
@@ -379,13 +444,25 @@ $DF regression-check      # 前置检查，有阻塞会退出码 1
 8. 数据库脚本
 9. 需求验收项
 
-用 `project.json` 里的 `commands`。跑完把**真实命令、退出码、输出摘要**写进
-`.devflow/regression/final-report.md`（用 `templates/regression-report.md`）。
+用 `project.json` 里的 `commands`，把结果写成 **JSON**（`templates/regression-report.json`）：
 
-没跑的写 `not_run` + 原因。**不要写 passed。**
+```bash
+$DF regression-import --file regression.json
+```
 
-发现问题：定位到需求和节点 → 生成修复任务 → 修 → 重跑受影响的测试 → 更新报告。
-不要在没定位的情况下乱改已完成模块。
+它做三件事：Schema 校验、语义校验（状态与检查项必须自洽）、由 JSON 渲染 Markdown。
+`final-report.json` 是事实来源，`final-report.md` 只是展示。
+
+- 任一必需项 `failed` → 整体必须 `failed`
+- 必需项 `not_run` / `skipped` → 整体不能是 `passed`
+- `passed` 的项必须有命令、退出码 0、证据
+- `not_run` 的项必须写原因
+- 缺 `config/quality-gates.yaml` 里的 `required_checks` → 拒绝导入
+
+没跑的写 `not_run` + 原因。**不要写 passed。** 旧项目只有 Markdown 时，
+`release --legacy-regression` 可以走降级路径，但会在项目档案里留记录。
+
+发现问题：定位到需求和节点 → 生成修复任务 → 修 → 重跑受影响的测试 → 重新导入。
 
 ## 14. release · 交付（三段式）
 
@@ -416,8 +493,12 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 
 必须带 `--by`，必须处于 `release_ready`。置 `accepted` 并记录验收人和时间。
 
-回归结论从报告里的 `结论：passed` 行读取。没写结论、写成 `failed`/`partial`、
-或者节点没完成，都进不了 `release_ready`。
+**`accepted` 是终态**：`start` / `sync` / `accept` / `retry` / `regression-check` / `release`
+等命令会被直接拒绝（退出码 2），`regression-check` 也不会再把状态改回 `regression`。
+需要继续开发必须走变更流程：`change-new` → `change-apply`（生成新计划，状态回 `in_progress`）。
+
+回归结论从 `final-report.json` 读取（旧项目可用 `--legacy-regression` 读 Markdown 的
+`结论：passed` 行）。没写结论、写成 `failed`、或者节点没完成，都进不了 `release_ready`。
 
 ## 15. 硬规则
 

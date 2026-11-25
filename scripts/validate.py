@@ -208,7 +208,14 @@ def load_config(skill_dir: Path) -> dict:
     return config
 
 
-def validate_all(root: Path, skill_dir: Path, plan_version: int | None = None, strict: bool = False) -> Report:
+def validate_all(
+    root: Path,
+    skill_dir: Path,
+    plan_version: int | None = None,
+    strict: bool = False,
+    activating: bool = False,
+) -> Report:
+    """activating=True 时按"即将生效"的标准校验草稿（提示词必须齐备且版本一致）。"""
     report = Report()
     paths = core.Paths(root)
     sv = SchemaValidator(skill_dir / "schemas")
@@ -263,10 +270,14 @@ def validate_all(root: Path, skill_dir: Path, plan_version: int | None = None, s
     if traceability:
         for err in sv.validate(traceability, "requirements.schema.json"):
             report.error(f"traceability.json {err}")
-        req_ids = {r["req_id"] for r in traceability.get("requirements", [])}
-        for req in traceability.get("requirements", []):
+        reqs = traceability.get("requirements", [])
+        req_ids = {r["req_id"] for r in reqs}
+        by_req = {r["req_id"]: r for r in reqs if r.get("req_id")}
+        for req in reqs:
             if req.get("status") == "active" and not req.get("acceptance"):
                 report.warn(f"{req['req_id']} 没有验收标准（acceptance）")
+            for problem in core.requirement_retirement_problems(req, by_req):
+                report.error(problem)
     elif project.get("current_requirement_version"):
         report.warn("project 记录了需求版本，但 requirements/traceability.json 不存在")
 
@@ -285,7 +296,7 @@ def validate_all(root: Path, skill_dir: Path, plan_version: int | None = None, s
         return _finish(report, strict)
 
     plan = core.load_json(paths.backlog(target_version))
-    _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv)
+    _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv, activating)
 
     # 5. 变更记录
     if paths.changes.exists():
@@ -305,7 +316,7 @@ def validate_all(root: Path, skill_dir: Path, plan_version: int | None = None, s
     return _finish(report, strict)
 
 
-def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
+def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv, activating=False):
     nodes = plan.get("nodes", [])
     by_id = {}
     version = plan.get("plan_version")
@@ -369,12 +380,21 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
             if not prompt_path.exists():
                 if node.get("status") not in ("superseded", "cancelled"):
                     msg = f"{nid}: 提示词文件不存在 {prompt_ref}"
-                    if plan.get("status") == "draft":
+                    if plan.get("status") == "draft" and not activating:
                         report.warn(msg + "（草稿阶段允许，激活前必须补齐）")
                     else:
                         report.error(msg)
             else:
+                text = core.read_text(prompt_path)
                 _check_prompt(report, nid, prompt_path, rules)
+                if node.get("status") not in ("completed", "superseded", "cancelled"):
+                    meta = core.parse_prompt_meta(text)
+                    for item in core.prompt_binding_problems(meta, project, plan, node):
+                        msg = f"{nid}: 提示词过期 —— {item}"
+                        if plan.get("status") == "draft" and not activating:
+                            report.warn(msg + "（草稿允许，激活前必须重新生成）")
+                        else:
+                            report.error(msg)
 
         # 需求追踪
         for rid in node.get("requirement_ids", []):
@@ -422,38 +442,13 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
     if cycles:
         return
 
-    # 并行组
-    groups: dict[str, list[dict]] = {}
-    for node in nodes:
-        if node.get("parallel_group"):
-            groups.setdefault(node["parallel_group"], []).append(node)
-
+    # 并行组：规则集中在 dfcore.parallel_issues，validate / dependency_check 共用同一套判定
     max_group = parallel_rules.get("max_group_size", 3)
-    for name, members in groups.items():
-        if len(members) > max_group:
-            report.warn(f"并行组 {name} 有 {len(members)} 个节点，超过建议上限 {max_group}")
-        ids = [m["node_id"] for m in members]
-        for member in members:
-            for dep in member.get("dependencies", []):
-                if dep in ids:
-                    report.error(
-                        f"并行组 {name} 内 {member['node_id']} 依赖 {dep}，不能并行执行"
-                    )
-        if parallel_rules.get("require_no_file_overlap", True):
-            for i in range(len(members)):
-                for j in range(i + 1, len(members)):
-                    overlap = _scope_overlap(members[i], members[j])
-                    if overlap:
-                        report.warn(
-                            f"并行组 {name}: {members[i]['node_id']} 与 {members[j]['node_id']} "
-                            f"的文件范围重叠（{', '.join(sorted(overlap)[:3])}），并行有覆盖风险"
-                        )
-
-    # 并行组内成员必须已 ready 或更后，否则说明规划不自洽
-    for name, members in groups.items():
-        if any(m.get("status") == "pending" for m in members) and \
-                any(m.get("status") in ("ready", "in_progress") for m in members):
-            report.warn(f"并行组 {name} 内状态不一致，检查依赖是否漏配")
+    for issue in core.parallel_issues(plan, max_group):
+        if issue["severity"] == "error":
+            report.error(issue["message"])
+        else:
+            report.warn(issue["message"])
 
     # 需求覆盖
     if req_ids:
@@ -476,16 +471,15 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv):
         if rv and not paths.confirmed_requirements(rv).exists():
             report.error(f"计划 v{version} 引用的需求基准 v{rv} 不存在")
 
-
-def _scope_overlap(a: dict, b: dict) -> set[str]:
-    out = set()
-    for x in a.get("files_scope", []):
-        for y in b.get("files_scope", []):
-            nx = x.replace("\\", "/").rstrip("/")
-            ny = y.replace("\\", "/").rstrip("/")
-            if nx == ny or nx.startswith(ny + "/") or ny.startswith(nx + "/"):
-                out.add(nx)
-    return out
+    # 变更产生的计划：节点迁移关系必须合理。
+    # 只对草稿检查——生效后的计划会继续推进（新节点变 completed），
+    # 那是正常演进，不是迁移问题。
+    based_on = plan.get("based_on") or {}
+    old_version = based_on.get("plan_version")
+    if plan.get("status") == "draft" and old_version and paths.backlog(old_version).exists():
+        old_plan = core.load_json(paths.backlog(old_version))
+        for item in core.migration_problems(old_plan, plan, based_on.get("change_id")):
+            report.error(f"节点迁移：{item}")
 
 
 def _check_prompt(report, node_id: str, path: Path, rules: dict):

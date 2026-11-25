@@ -101,15 +101,22 @@ $DF change-apply --change CR-001
 ## 七、回归与交付
 
 ```bash
-$DF regression-check     # 前置检查
-# 真实跑构建与测试，把结果写进 .devflow/regression/final-report.md（要有「结论：passed」行）
+$DF regression-check     # 前置检查（需求没覆盖、节点没完成都会退出码 1）
+# 真实跑构建与测试，把结果写成 JSON（模板：templates/regression-report.json）
+$DF regression-import --file regression.json   # 校验 + 渲染 Markdown
 
 $DF release              # 生成交付报告 → release_candidate（报告 ≠ 交付）
 $DF release-ready        # 复核门槛 → release_ready
 $DF release-accept --by "张三"   # 用户验收 → accepted
 ```
 
-`release` 有阻塞时会退出码 1，但报告仍会生成，方便对照修。
+`regression-import` 会校验：Schema、状态与检查项自洽、必需检查项齐全、
+`passed` 项有命令/退出码/证据、`not_run` 项有原因。缺一项就拒绝导入。
+
+`release` 读 JSON，不看 Markdown 措辞。旧项目只有 Markdown 时用
+`release --legacy-regression`（降级，会在项目档案留记录）。
+
+`release` 有阻塞时退出码 1，但报告仍会生成，方便对照修。
 `release-ready` 会重新查一遍，状态可能在这期间变化。
 `accepted` 只能由用户明确执行 `release-accept` 产生。
 
@@ -150,6 +157,22 @@ CR 的 `base_plan_version` 与当前计划不一致。说明期间已经有别�
 
 **Q：`release` 生成了报告，但状态不是 accepted？**
 这是设计如此。报告只是候选，`release-ready` 检查条件，`release-accept` 才是验收。
+
+**Q：计划改了，旧提示词还能用吗？**
+不能。`start` 会核对提示词头部的 `plan_version` / `requirement_version`，对不上直接拒绝。
+重新生成：`df.py prompt-init <ID> --force`。
+
+**Q：外部 Agent 的报告怎么进来？**
+先 `start`（生成 attempt_id），把两份报告放一个目录，然后
+`df.py sync <ID> --external --from <目录>`。它会校验身份再导入，之后走同一套验收。
+
+**Q：`sync` 提示"Git 实际变更与报告不一致"？**
+说明报告里写的改动和实际工作区对不上。默认只是提示（`verify_changes: warn`），
+改成 `error` 就会阻止验收。确认无误用 `accept --ack-changes --reason "..."`。
+
+**Q：为什么 `regression-check` 说我需求没覆盖？**
+每条 active 需求都要有已完成节点覆盖，且不能只由 `no_test` 节点覆盖。
+确实不做就标 `deferred` / `out_of_scope`，但必须写 `reason` 和 `confirmed_by`。
 
 **Q：进程被 kill 了，状态会不会坏？**
 写操作有文件锁和原子写，单文件不会半截。多文件提交（change-apply）有事务日志，

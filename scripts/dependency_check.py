@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""任务依赖检查：环检测、缺失依赖、分层并行度、关键路径。
+"""任务依赖检查：环检测、缺失依赖、拓扑分层、并行组安全、关键路径。
+
+分层只表示依赖层级；并行是否安全由 core.parallel_issues 判定，
+与 validate.py 使用同一套规则，保证两个入口结论一致。
 
 用法：
     python dependency_check.py --project .              # 检查并打印
@@ -21,7 +24,7 @@ import dfcore as core
 from dfcore import DevFlowError
 
 
-def analyse(plan: dict) -> dict:
+def analyse(plan: dict, max_group_size: int = 3) -> dict:
     nodes = plan["nodes"]
     by_id = {n["node_id"]: n for n in nodes}
     problems: list[str] = []
@@ -40,7 +43,8 @@ def analyse(plan: dict) -> dict:
 
     levels: dict[str, int] = {}
     if not cycles and not missing:
-        # 最长路径分层：同层节点之间必然没有依赖，可以作为并行候选
+        # 最长路径分层：同层节点之间没有依赖，只是并行"候选"。
+        # 能不能真并行还要看 files_scope / db_objects / api_contracts，见 parallel_issues。
         for nid in core.topological_order(nodes):
             node = by_id[nid]
             levels[nid] = 1 + max(
@@ -93,6 +97,20 @@ def analyse(plan: dict) -> dict:
     if unreachable:
         problems.extend(unreachable)
 
+    # 并行组安全：同一组里"没有依赖"不等于"代码不打架"
+    parallel_issues = core.parallel_issues(plan, max_group_size)
+    for issue in parallel_issues:
+        if issue["severity"] == "error":
+            problems.append(issue["message"])
+        else:
+            warnings.append(issue["message"])
+
+    groups: dict[str, list[str]] = {}
+    for node in nodes:
+        group = node.get("parallel_group")
+        if group:
+            groups.setdefault(group, []).append(node["node_id"])
+
     pending_with_reason = []
     for node in nodes:
         if node.get("status") != "pending":
@@ -112,6 +130,8 @@ def analyse(plan: dict) -> dict:
         "critical_path": critical,
         "ready": [n["node_id"] for n in core.ready_nodes(plan)],
         "waiting": pending_with_reason,
+        "parallel_groups": groups,
+        "parallel_issues": parallel_issues,
     }
 
 
@@ -138,7 +158,7 @@ def render_graph(plan: dict, result: dict) -> str:
                 lines.append(f"  {dep.replace('-', '_')} --> {node['node_id'].replace('-', '_')}")
     lines.append("```")
     lines.append("")
-    lines.append("## 分层（同层无依赖，可作并行候选）")
+    lines.append("## 分层（同层无依赖，仅作并行候选）")
     lines.append("")
     for level in sorted(result["levels"]):
         members = result["levels"][level]
@@ -146,6 +166,23 @@ def render_graph(plan: dict, result: dict) -> str:
             lines.append(f"- L0（分层失败）：{', '.join(members)}")
         else:
             lines.append(f"- L{level}：{', '.join(members)}")
+    lines.append("")
+    lines.append("> 同层只说明「没有依赖」，不说明「改的代码不冲突」。要并行请显式配 `parallel_group`，")
+    lines.append("> 校验器会检查依赖可达性、`files_scope`、`db_objects`、`api_contracts`、`shared_config`。")
+    lines.append("")
+    lines.append("## 并行组")
+    lines.append("")
+    if result["parallel_groups"]:
+        for name, members in sorted(result["parallel_groups"].items()):
+            lines.append(f"- 组 {name}：{', '.join(members)}")
+    else:
+        lines.append("- 无（全部串行）")
+    issues = result.get("parallel_issues") or []
+    if issues:
+        lines.append("")
+        for issue in issues:
+            mark = "✗" if issue["severity"] == "error" else "!"
+            lines.append(f"- {mark} {issue['message']}")
     lines.append("")
     lines.append("## 依赖明细")
     lines.append("")
@@ -155,6 +192,22 @@ def render_graph(plan: dict, result: dict) -> str:
         lines.append(f"- `{node['node_id']}` ← {text}（{node.get('status')}）")
     lines.append("")
     return "\n".join(lines)
+
+
+def _max_group_size() -> int:
+    """读 config/task-rules.yaml，和 validate.py 保持同一个上限。"""
+    skill_dir = Path(__file__).resolve().parents[1]
+    for name in ("task-rules.json", "task-rules.yaml"):
+        path = skill_dir / "config" / name
+        if path.exists():
+            try:
+                rules = core.load_config_file(path)
+            except Exception:  # noqa: BLE001 —— 配置坏了就让 validate 去报错
+                return 3
+            value = (rules.get("parallel") or {}).get("max_group_size")
+            if isinstance(value, int) and value > 0:
+                return value
+    return 3
 
 
 def main(argv=None) -> int:
@@ -177,7 +230,7 @@ def main(argv=None) -> int:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
 
-    result = analyse(plan)
+    result = analyse(plan, _max_group_size())
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -191,9 +244,17 @@ def main(argv=None) -> int:
             print("✓ 无循环依赖，依赖节点全部存在")
         if result["critical_path"]:
             print(f"- 关键路径（{len(result['critical_path'])} 层）：{' → '.join(result['critical_path'])}")
-        print("- 分层：")
+        print("- 分层（同层无依赖，仅作并行候选）：")
         for level in sorted(result["levels"]):
             print(f"    L{level}: {', '.join(result['levels'][level])}")
+        if result.get("parallel_groups"):
+            print("- 并行组：")
+            for name, members in sorted(result["parallel_groups"].items()):
+                print(f"    {name}: {', '.join(members)}")
+        if result["warnings"]:
+            print(f"! 提醒 {len(result['warnings'])}")
+            for item in result["warnings"]:
+                print(f"  - {item}")
         print(f"- 当前可执行：{', '.join(result['ready']) or '无'}")
         if result["waiting"]:
             print("- 等待依赖：")

@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0",
+  "plan_version": 1,
+  "requirement_version": 1,
+  "status": "passed",
+  "executed_at": "2026-01-01T10:00:00+08:00",
+  "executed_by": "code-agent",
+  "checks": [
+    {
+      "check_id": "build",
+      "name": "编译 / 构建",
+      "required": true,
+      "status": "passed",
+      "command": "python -m compileall -q src",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:00:00+08:00",
+      "evidence": "无输出，退出码 0",
+      "notes": ""
+    },
+    {
+      "check_id": "unit_test",
+      "name": "单元测试",
+      "required": true,
+      "status": "passed",
+      "command": "python -m unittest discover -s tests",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:01:00+08:00",
+      "evidence": "Ran 74 tests / OK",
+      "notes": ""
+    },
+    {
+      "check_id": "integration",
+      "name": "集成测试",
+      "required": true,
+      "status": "passed",
+      "command": "python -m unittest discover -s tests -p 'test_integration.py'",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:02:00+08:00",
+      "evidence": "Ran 5 tests / OK",
+      "notes": ""
+    },
+    {
+      "check_id": "core_flow",
+      "name": "核心业务链路",
+      "required": true,
+      "status": "passed",
+      "command": "python scripts/smoke.py",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:03:00+08:00",
+      "evidence": "端到端脚本输出：余额 24，流水 5 条，两条对账成立",
+      "notes": ""
+    },
+    {
+      "check_id": "consistency",
+      "name": "数据一致性",
+      "required": true,
+      "status": "passed",
+      "command": "python scripts/reconcile.py",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:04:00+08:00",
+      "evidence": "sum(amount)==balance, sum(frozen_delta)==frozen",
+      "notes": ""
+    },
+    {
+      "check_id": "requirement_acceptance",
+      "name": "需求验收项",
+      "required": true,
+      "status": "passed",
+      "command": "对照 traceability.json 逐条核对",
+      "exit_code": 0,
+      "executed_at": "2026-01-01T10:05:00+08:00",
+      "evidence": "9 条需求均有已完成节点覆盖",
+      "notes": ""
+    },
+    {
+      "check_id": "permission",
+      "name": "权限校验",
+      "required": false,
+      "status": "skipped",
+      "command": null,
+      "exit_code": null,
+      "executed_at": null,
+      "evidence": null,
+      "notes": "本期无鉴权实现，调用方负责（OPEN-003）"
+    }
+  ],
+  "notes": "把不适用的检查项标 skipped 并写原因，不要留空；没跑的写 not_run。"
+}

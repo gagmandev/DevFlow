@@ -65,6 +65,21 @@
       "items": { "type": "string" },
       "description": "允许修改的文件/目录范围；空数组表示仅允许新增 outputs 中列出的文件"
     },
+    "db_objects": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "涉及的表/集合/迁移脚本标识；同一并行组内不允许重复"
+    },
+    "api_contracts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "涉及修改的接口契约标识；同一并行组内不允许重复"
+    },
+    "shared_config": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "涉及的共享配置项；同一并行组内不允许重复"
+    },
     "test_strategy": {
       "type": "array",
       "items": { "type": "string" },
@@ -101,6 +116,45 @@
       "description": "本轮执行的唯一标识；执行报告与测试报告必须回填同一个值"
     },
     "attempt_number": { "type": ["integer", "null"], "minimum": 1 },
+    "prompt_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "提示词版本；每次 prompt-init 递增"
+    },
+    "git_baseline": {
+      "type": ["object", "null"],
+      "description": "start 时记录的 Git 基准：head、已有未提交文件",
+      "properties": {
+        "head": { "type": ["string", "null"] },
+        "dirty_files": { "type": "array", "items": { "type": "string" } },
+        "captured_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "git_actual_changes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "sync 时检测到的实际变更（已排除执行前就存在的修改）"
+    },
+    "git_discrepancies": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "实际变更与 modified_files 的差异；非空需要人工确认"
+    },
+    "git_waivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason", "at"],
+        "properties": {
+          "reason": { "type": "string" },
+          "at": { "type": "string" },
+          "by": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
+      "description": "人工确认 Git 差异的记录"
+    },
     "scope_violations": {
       "type": "array",
       "items": { "type": "string" },

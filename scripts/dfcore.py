@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import unicodedata
@@ -21,7 +22,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 DF_DIRNAME = ".devflow"
 
 PROJECT_STATUSES = [
@@ -799,6 +800,133 @@ def migrate_project_data(data: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Git 实际变更核对（可选能力，不是硬依赖）
+# --------------------------------------------------------------------------
+
+
+def _git(root: Path, *args, timeout: int = 15):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _parse_porcelain_z(out: str) -> list[str]:
+    parts = out.split("\0")
+    files = []
+    i = 0
+    while i < len(parts):
+        entry = parts[i]
+        i += 1
+        if not entry or len(entry) < 4:
+            continue
+        code = entry[:2]
+        path = entry[3:]
+        if "R" in code or "C" in code:
+            i += 1  # 重命名/复制：下一段是原路径
+        files.append(path.replace("\\", "/"))
+    return files
+
+
+def git_snapshot(root: Path) -> dict | None:
+    """记录执行前的 Git 基准。不在 git 仓库里返回 None（降级）。"""
+    inside = _git(root, "rev-parse", "--is-inside-work-tree")
+    if not inside or inside.strip() != "true":
+        return None
+    top = _git(root, "rev-parse", "--show-toplevel")
+    # 项目不是仓库根目录时，路径换算容易出错，直接降级
+    if not top or Path(os.path.realpath(top.strip())) != Path(os.path.realpath(str(root))):
+        return None
+    head = _git(root, "rev-parse", "HEAD")
+    status = _git(root, "status", "--porcelain", "-z") or ""
+    return {
+        "head": head.strip() if head else None,
+        "dirty_files": _parse_porcelain_z(status),
+        "captured_at": now_iso(),
+    }
+
+
+def git_changes_since(root: Path, baseline: dict | None) -> list[str] | None:
+    """相对基准的实际变更。
+
+    关键：减去 `baseline.dirty_files` —— 用户在执行任务前就存在的未提交修改
+    不能被算到这个节点头上。
+    """
+    if not baseline:
+        return None
+    current = git_snapshot(root)
+    if current is None:
+        return None
+
+    changes: set[str] = set(current["dirty_files"])
+    if baseline.get("head"):
+        diff = _git(root, "diff", "--name-only", baseline["head"], "--")
+        if diff:
+            changes |= {line.strip() for line in diff.splitlines() if line.strip()}
+
+    protected = {p.replace("\\", "/") for p in baseline.get("dirty_files", [])}
+    changes -= protected
+    return sorted(
+        p for p in changes
+        if p and not p.startswith(DF_DIRNAME + "/") and not p.startswith("./")
+    )
+
+
+# --------------------------------------------------------------------------
+# 提示词版本绑定
+# --------------------------------------------------------------------------
+
+PROMPT_META_KEYS = (
+    "project_id",
+    "node_id",
+    "plan_version",
+    "requirement_version",
+    "prompt_version",
+)
+
+
+def parse_prompt_meta(text: str) -> dict:
+    """读取提示词头部的 `---` 元数据块。"""
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    meta = {}
+    for line in text[3:end].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        meta[key.strip()] = value.strip().strip('"').strip("'")
+    return meta
+
+
+def prompt_binding_problems(meta: dict, project_data: dict, plan: dict, node: dict) -> list[str]:
+    """提示词是否与当前项目/计划/需求一致。"""
+    if not meta:
+        return ["提示词没有版本元数据（--- 头），无法确认它属于当前计划；请重新生成 prompt-init --force"]
+    expected = {
+        "project_id": project_data.get("project_id"),
+        "node_id": node["node_id"],
+        "plan_version": str(plan.get("plan_version")),
+        "requirement_version": str(plan.get("requirement_version")),
+    }
+    problems = []
+    for key, value in expected.items():
+        got = meta.get(key)
+        if got != str(value):
+            problems.append(f"提示词的 {key}={got!r}，当前应为 {value!r}")
+    return problems
+
+
+# --------------------------------------------------------------------------
 # 项目与计划
 # --------------------------------------------------------------------------
 
@@ -970,6 +1098,262 @@ def ready_nodes(plan: dict) -> list[dict]:
         for n in plan["nodes"]
         if n.get("status") == "ready" and not unmet_dependencies(n, plan)
     ]
+
+
+# --------------------------------------------------------------------------
+# 需求退役：改成非 active 不是逃生门
+# --------------------------------------------------------------------------
+
+RETIRED_REQUIREMENT_STATUSES = ("deferred", "out_of_scope", "removed")
+
+
+def requirement_retirement_problems(req: dict, by_req: dict | None = None) -> list[str]:
+    """非 active 需求是否留下了合法凭据。
+
+    - deferred / out_of_scope / removed：必须写 reason 和 confirmed_by
+    - changed：必须 superseded_by 指向一条存在且 active 的需求
+    - 其他未知状态：一律要求 reason + confirmed_by（不能靠改状态混过去）
+    """
+    rid = req.get("req_id") or "?"
+    status = req.get("status")
+    if status == "active":
+        return []
+
+    if status == "changed":
+        target = str(req.get("superseded_by") or "").strip()
+        if not target:
+            return [
+                f"{rid} 标记为 changed，但没有 superseded_by（旧需求必须指向替代需求）"
+            ]
+        if by_req is None:
+            return []
+        replacement = by_req.get(target)
+        if replacement is None:
+            return [f"{rid} 由 {target} 替代，但需求表里没有 {target}"]
+        if replacement.get("status") != "active":
+            return [
+                f"{rid} 由 {target} 替代，但 {target} 当前是 {replacement.get('status')}，"
+                "不能作为有效覆盖"
+            ]
+        return []
+
+    if not str(req.get("reason") or "").strip() or \
+            not str(req.get("confirmed_by") or "").strip():
+        return [
+            f"{rid} 标记为 {status}，但缺少 reason / confirmed_by"
+            "（不能靠改状态绕过覆盖检查）"
+        ]
+    return []
+
+
+# --------------------------------------------------------------------------
+# 并行安全：同组节点能不能真的同时开工
+# --------------------------------------------------------------------------
+#
+# 拓扑分层只说明"没有依赖"，不说明"代码不打架"。两个节点同层完全可以改同一个文件，
+# 所以并行组必须单独检查依赖可达性与资源冲突。
+
+#: 节点上的"共享资源"字段 → 面向人的说明
+PARALLEL_RESOURCE_FIELDS = (
+    ("db_objects", "数据库对象"),
+    ("api_contracts", "API 契约"),
+    ("shared_config", "共享配置"),
+)
+
+
+def node_reaches(by_id: dict, start: str, target: str) -> bool:
+    """start 是否（间接）依赖 target。"""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        for dep in by_id.get(nid, {}).get("dependencies") or []:
+            if dep == target:
+                return True
+            stack.append(dep)
+    return False
+
+
+def scope_overlap(a: dict, b: dict) -> set[str]:
+    """两个节点 files_scope 的重叠路径（规范化后相等或互为父子目录）。"""
+    out: set[str] = set()
+    for x in a.get("files_scope") or []:
+        for y in b.get("files_scope") or []:
+            try:
+                nx = normalize_rel(x)
+                ny = normalize_rel(y)
+            except ValueError:
+                continue
+            if nx == ny or nx.startswith(ny + "/") or ny.startswith(nx + "/"):
+                out.add(nx)
+    return out
+
+
+def pair_conflicts(a: dict, b: dict) -> list[str]:
+    """两个节点的资源冲突说明（空列表表示这一对没有已知冲突）。"""
+    conflicts: list[str] = []
+    overlap = scope_overlap(a, b)
+    if overlap:
+        conflicts.append(f"文件范围重叠（{', '.join(sorted(overlap)[:3])}）")
+    for field, label in PARALLEL_RESOURCE_FIELDS:
+        shared = sorted(set(a.get(field) or []) & set(b.get(field) or []))
+        if shared:
+            conflicts.append(f"同时修改{label}（{', '.join(shared[:3])}）")
+    return conflicts
+
+
+def parallel_exceptions(plan: dict) -> dict[str, dict]:
+    """组名 → 已记录（有理由且有人批准）的例外。"""
+    out: dict[str, dict] = {}
+    for entry in plan.get("parallel_exceptions") or []:
+        if not isinstance(entry, dict):
+            continue
+        group = entry.get("group")
+        if not group or not str(entry.get("reason") or "").strip():
+            continue
+        if not str(entry.get("approved_by") or "").strip():
+            continue
+        out[group] = entry
+    return out
+
+
+def _exception_covers(entry: dict, a: str, b: str) -> bool:
+    nodes = entry.get("nodes")
+    if not nodes:
+        return True
+    allowed = set(nodes)
+    return a in allowed and b in allowed
+
+
+def parallel_issues(plan: dict, max_group_size: int = 3) -> list[dict]:
+    """检查所有并行组，返回 [{severity, group, nodes, kind, message}]。
+
+    severity=error 的项表示"不能这样并行"；warn 只是提示（例如已记录例外）。
+    供 validate（是否阻止激活）和 dependency_check（诊断报告）共用，
+    避免两个入口对同一条规则给出不同结论。
+    """
+    nodes = plan.get("nodes") or []
+    by_id = {n["node_id"]: n for n in nodes}
+    groups: dict[str, list[dict]] = {}
+    for node in nodes:
+        # 废弃/取消的节点不会再执行，不参与并行冲突判定
+        if node.get("status") in ("superseded", "cancelled"):
+            continue
+        if node.get("parallel_group"):
+            groups.setdefault(node["parallel_group"], []).append(node)
+
+    exceptions = parallel_exceptions(plan)
+    issues: list[dict] = []
+
+    for name, members in groups.items():
+        ids = [m["node_id"] for m in members]
+        exception = exceptions.get(name)
+
+        if len(members) > max_group_size:
+            issues.append({
+                "severity": "warn", "group": name, "nodes": ids, "kind": "group_size",
+                "message": f"并行组 {name} 有 {len(members)} 个节点，超过建议上限 {max_group_size}",
+            })
+
+        for member in members:
+            for dep in member.get("dependencies") or []:
+                if dep in ids:
+                    issues.append({
+                        "severity": "error", "group": name, "nodes": [member["node_id"], dep],
+                        "kind": "direct_dependency",
+                        "message": f"并行组 {name} 内 {member['node_id']} 依赖 {dep}，不能并行执行",
+                    })
+
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                an, bn = a["node_id"], b["node_id"]
+                if node_reaches(by_id, an, bn) or node_reaches(by_id, bn, an):
+                    issues.append({
+                        "severity": "error", "group": name, "nodes": [an, bn],
+                        "kind": "indirect_dependency",
+                        "message": f"并行组 {name}: {an} 与 {bn} 存在间接依赖，不能并行",
+                    })
+                for text in pair_conflicts(a, b):
+                    message = f"并行组 {name}: {an} / {bn} {text}"
+                    if exception and _exception_covers(exception, an, bn):
+                        issues.append({
+                            "severity": "warn", "group": name, "nodes": [an, bn],
+                            "kind": "resource_conflict",
+                            "message": message + f"（已记录例外：{exception.get('reason')}）",
+                        })
+                    else:
+                        issues.append({
+                            "severity": "error", "group": name, "nodes": [an, bn],
+                            "kind": "resource_conflict",
+                            "message": message
+                            + "；确认安全请加 parallel_exceptions（group + reason + approved_by）",
+                        })
+
+        statuses = {m.get("status") for m in members}
+        if "pending" in statuses and statuses & {"ready", "in_progress"}:
+            issues.append({
+                "severity": "warn", "group": name, "nodes": ids, "kind": "status_mismatch",
+                "message": f"并行组 {name} 内状态不一致，检查依赖是否漏配",
+            })
+
+    return issues
+
+
+def migration_problems(old_plan: dict, new_plan: dict, change_id: str | None = None) -> list[str]:
+    """新版计划的节点迁移是否合理。
+
+    - 旧节点不能凭空消失（要么保留，要么显式 superseded）
+    - 已完成的节点被返工，必须写清是哪个变更触发的
+    - 新计划里不能凭空出现 completed 节点
+    """
+    problems: list[str] = []
+    old_nodes = {n["node_id"]: n for n in old_plan.get("nodes", [])}
+    new_nodes = {n["node_id"]: n for n in new_plan.get("nodes", [])}
+    new_version = new_plan.get("plan_version")
+
+    for nid, old in old_nodes.items():
+        if old.get("status") in ("superseded", "cancelled"):
+            continue
+        if nid not in new_nodes:
+            problems.append(
+                f"{nid} 在新版计划里消失了；不需要就显式标 superseded 并说明原因"
+            )
+            continue
+        new = new_nodes[nid]
+        if old.get("status") == "completed" and new.get("status") not in ("completed", "superseded"):
+            remark = str(new.get("remark") or "")
+            if change_id and change_id not in remark:
+                problems.append(
+                    f"{nid} 在 v{old_plan.get('plan_version')} 已完成，"
+                    f"新版变成 {new.get('status')}，但 remark 没有写 {change_id} 的返工依据"
+                )
+            elif not remark:
+                problems.append(
+                    f"{nid} 已完成却被返工（{new.get('status')}），必须在 remark 写明原因"
+                )
+
+    for nid, new in new_nodes.items():
+        if new.get("status") != "completed":
+            continue
+        old = old_nodes.get(nid)
+        if old is None:
+            problems.append(f"{nid} 在新版里直接标 completed，但它不是旧计划里的节点")
+        elif old.get("status") != "completed":
+            problems.append(
+                f"{nid} 在新版里标 completed，但旧计划里它是 {old.get('status')}"
+            )
+
+    for nid, new in new_nodes.items():
+        if nid in old_nodes:
+            continue
+        created = new.get("created_in_plan")
+        if created not in (None, new_version):
+            problems.append(f"{nid} 是新增节点，但 created_in_plan={created} ≠ v{new_version}")
+    return problems
 
 
 def stats(plan: dict) -> dict:

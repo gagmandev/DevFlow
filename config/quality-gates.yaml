@@ -31,6 +31,22 @@ gates:
     forbid_open_blockers: true
     forbid_missing_reports: true
     forbid_failed_tests: true
+    # 需求没有被任何节点覆盖时直接判失败（不是警告）
+    block_uncovered_requirements: true
+    # 这些检查项必须存在且状态为 passed；不适用的项要标 skipped 并写原因
+    required_checks:
+      - build
+      - unit_test
+      - integration
+      - core_flow
+      - consistency
+      - requirement_acceptance
+
+  git:
+    # off    不检查
+    # warn   记录差异并提示，验收前人工看
+    # error  有差异就阻止验收（需要 --ack-changes 记录豁免）
+    verify_changes: warn
 
   release:
     require_regression_report: true

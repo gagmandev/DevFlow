@@ -67,6 +67,9 @@ start（检查依赖）
 并行：满足六条件的节点进同一个 `parallel_group`。
 宿主支持子 Agent 就并行派发，不支持就生成并行清单让用户手动投喂。
 **不要说"已并行执行"如果实际是顺序做的。**
+同组冲突（间接依赖、文件/表/接口/配置撞车）会被校验器阻断，例外要写 `parallel_exceptions`。
+
+外部 Agent 的报告用 `sync <ID> --external --from <目录>` 导入，仍走同一套校验。
 
 ### 阶段 5 · 变更（change）
 
@@ -83,12 +86,14 @@ start（检查依赖）
 ### 阶段 6 · 回归（regression）
 
 ```
-regression-check（节点完成度、证据、需求覆盖）
+regression-check（节点完成度、证据、需求覆盖、需求验收项证据——任一不足直接失败）
   → 真实执行：构建 / 单元 / 集成 / 核心链路 / 契约 / 一致性 / 权限 / 脚本
   → 问题定位到 REQ 与 DF
   → 修复 → 重跑受影响测试
-  → 写 final-report.md
+  → 写 final-report.json → regression-import（校验 + 渲染 Markdown）
 ```
+
+JSON 是事实来源，整体状态必须与检查项推导结果一致；缺必需检查项直接拒绝导入。
 
 没跑的写 `not_run`。**不要写 passed。**
 
@@ -112,11 +117,16 @@ regression-check（节点完成度、证据、需求覆盖）
 | `block` / `fail` | `→ blocked` / `→ failed` |
 | `retry` | `failed/blocked → in_progress`，生成新的 `attempt_id` |
 | `change-apply` | 旧计划 `→ superseded`，新计划 `→ active`（事务提交） |
-| `regression-check` | `→ regression` |
+| `regression-check` | `→ regression`（有阻塞则失败） |
+| `regression-import` | 写入 `final-report.json` + 渲染 Markdown |
 | `release` | `→ release_candidate`（仅生成报告） |
 | `release-ready` | `release_candidate → release_ready`（门槛通过） |
 | `release-accept` | `release_ready → accepted`（用户确认） |
 | `recover` | 回滚未完成事务，恢复文件到事务前 |
+
+`accepted` 是终态：之后 `start` / `sync` / `accept` / `retry` / `regression-check` / `release` /
+`release-ready` 都会被拒绝（退出码 2）。要继续开发走 `change-new` → `change-apply`，
+新计划激活时状态回到 `in_progress`。
 
 ## 四、示例项目走了一遍
 

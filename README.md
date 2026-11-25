@@ -1,6 +1,6 @@
 # DevFlow
 
-> 版本 1.1 · 工程可靠性加固版（证据硬校验 / 范围拦截 / 跨进程锁 / 事务提交 / 交付三段式）
+> 版本 1.2 · 工程可靠性加固版（证据硬校验 / 范围拦截 / 跨进程锁 / 事务提交 / 交付三段式 / 回归 JSON / 并行冲突 / 提示词版本绑定）
 
 把一份需求文档变成**能真正执行到交付**的开发流水线。
 
@@ -51,6 +51,7 @@ $DF sync DF-001 && $DF accept DF-001
 
 # 全部完成后
 $DF regression-check
+$DF regression-import --file regression.json   # 真实结果写成 JSON 再导入
 $DF release              # 生成报告 → release_candidate
 $DF release-ready        # 门槛复核 → release_ready
 $DF release-accept --by "我"   # 用户验收 → accepted
@@ -72,6 +73,12 @@ V1 的校验层偏软——多个关键约束只打印警告、不改变状态�
 | 两个进程同时改状态 | OS 级排他锁（崩溃自动释放），锁内重读 |
 | change-apply 中途崩溃 | 快照 + 事务日志 + 自动回滚，`df.py recover` |
 | 生成交付报告就被当成已交付 | 三段式：candidate → ready → accepted |
+| 需求没覆盖也能进回归 | `regression-check` 直接失败；改状态绕过需要理由和确认人 |
+| 回归报告只有 Markdown | `final-report.json` 是事实来源，状态必须与检查项自洽 |
+| 外部 Agent 的报告免检 | `sync --external` 只搬文件，之后走同一套校验 |
+| 报告声称改了、实际没改 | Git 基准比对，自动排除执行前已有的未提交修改 |
+| 并行组靠"同层"猜安全 | 间接依赖 / 文件 / 表 / 接口 / 配置冲突直接阻止激活 |
+| 计划变了还在用旧提示词 | 提示词带版本元数据，`start` 对不上就拒绝 |
 
 审计报告见 `docs/engineering-audit.md`。
 

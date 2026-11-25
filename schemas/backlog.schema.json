@@ -34,6 +34,22 @@
       "additionalProperties": false
     },
     "stats_note": { "type": "string" },
+    "parallel_exceptions": {
+      "type": "array",
+      "description": "人工确认的并行例外；没有记录就不能把冲突节点放进同一并行组",
+      "items": {
+        "type": "object",
+        "required": ["group", "reason", "approved_by"],
+        "properties": {
+          "group": { "type": "string" },
+          "nodes": { "type": "array", "items": { "type": "string" } },
+          "reason": { "type": "string", "minLength": 1 },
+          "approved_by": { "type": "string", "minLength": 1 },
+          "at": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
     "nodes": {
       "type": "array",
       "minItems": 1,

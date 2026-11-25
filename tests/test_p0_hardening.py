@@ -76,13 +76,12 @@ class Project:
             encoding="utf-8",
         )
 
-    def import_plan(self, nodes, version=1):
+    def import_plan(self, nodes, version=1, **extra):
         path = self.paths.plans / f".import-{version}.json"
         self.paths.plans.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"requirement_version": 1, "nodes": nodes}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        payload = {"requirement_version": 1, "nodes": nodes}
+        payload.update(extra)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return quiet(df.main, [
             "plan-import", "--file", str(path), "--version", str(version),
             "--project", str(self.root),
@@ -456,6 +455,7 @@ class TransactionTest(unittest.TestCase):
         p.run("accept", "DF-001")
 
         p.import_plan([node("DF-001", status="completed"), node("DF-002", dependencies=["DF-001"])], version=2)
+        p.run("prompt-init", "--all", "--plan", "2")
         code, out = p.run("change-new", "--title", "加一个节点", "--type", "add")
         self.assertEqual(code, 0, out)
         cr_path = p.paths.change_dir("CR-001") / "change-request.json"
@@ -544,6 +544,8 @@ class TransactionTest(unittest.TestCase):
 class ReleaseStateTest(unittest.TestCase):
     """P0-5：生成报告 ≠ 交付条件满足 ≠ 用户验收。"""
 
+    REQUIRED = ["build", "unit_test", "integration", "core_flow", "consistency", "requirement_acceptance"]
+
     def _completed_project(self):
         p = Project()
         p.import_plan([node("DF-001")])
@@ -555,22 +557,45 @@ class ReleaseStateTest(unittest.TestCase):
         return p
 
     def _write_regression(self, p, conclusion="passed"):
-        p.paths.regression.mkdir(parents=True, exist_ok=True)
-        (p.paths.regression / "final-report.md").write_text(
-            "# 全量回归报告\n\n## 2. 执行项与结果\n\n| 项 | 结果 |\n| --- | --- |\n| 测试 | passed |\n\n"
-            f"## 6. 回归结论\n\n结论：**{conclusion}**\n\n" + "说明。" * 40,
-            encoding="utf-8",
-        )
+        checks = []
+        for cid in self.REQUIRED:
+            ok = conclusion == "passed"
+            checks.append({
+                "check_id": cid,
+                "name": cid,
+                "required": True,
+                "status": "passed" if ok else "failed",
+                "command": "python -m unittest",
+                "exit_code": 0 if ok else 1,
+                "executed_at": "2026-11-25T15:00:00+08:00",
+                "evidence": "Ran 1 test OK" if ok else "1 failed",
+                "notes": "" if ok else "测试失败",
+            })
+        data = {
+            "schema_version": "1.0",
+            "plan_version": 1,
+            "requirement_version": 1,
+            "status": conclusion,
+            "executed_at": "2026-11-25T15:00:00+08:00",
+            "executed_by": "tester",
+            "checks": checks,
+        }
+        path = p.root / "regression.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return p.run("regression-import", "--file", str(path))
 
     def test_release_does_not_mean_accepted(self):
         p = self._completed_project()
         try:
-            self._write_regression(p)
+            code, out = self._write_regression(p)
+            self.assertEqual(code, 0, out)
+            self.assertTrue((p.paths.regression / "final-report.json").exists())
+            self.assertIn("结论：**passed**", (p.paths.regression / "final-report.md").read_text(encoding="utf-8"))
+
             code, out = p.run("release")
             self.assertEqual(code, 0, out)
             status = core.load_json(p.paths.project)["status"]
             self.assertEqual(status, "release_candidate")
-            self.assertNotEqual(status, "accepted")
         finally:
             p.close()
 
@@ -601,21 +626,36 @@ class ReleaseStateTest(unittest.TestCase):
             self._write_regression(p, conclusion="failed")
             code, out = p.run("release")
             self.assertEqual(code, 1)
-            self.assertIn("回归结论是 failed", out)
+            self.assertIn("回归未通过", out)
             self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
-            code, _ = p.run("release-ready")
-            self.assertEqual(code, 1)
+            self.assertEqual(p.run("release-ready")[0], 1)
         finally:
             p.close()
 
-    def test_missing_conclusion_blocks(self):
+    def test_missing_json_blocks(self):
         p = self._completed_project()
         try:
             p.paths.regression.mkdir(parents=True, exist_ok=True)
-            (p.paths.regression / "final-report.md").write_text("# 报告\n\n" + "内容。" * 100, encoding="utf-8")
+            (p.paths.regression / "final-report.md").write_text(
+                "# 报告\n\n结论：**passed**\n\n" + "内容。" * 100, encoding="utf-8"
+            )
             code, out = p.run("release")
             self.assertEqual(code, 1)
-            self.assertIn("结论", out)
+            self.assertIn("机器可读回归报告", out)
+        finally:
+            p.close()
+
+    def test_legacy_markdown_opt_in(self):
+        p = self._completed_project()
+        try:
+            p.paths.regression.mkdir(parents=True, exist_ok=True)
+            (p.paths.regression / "final-report.md").write_text(
+                "# 报告\n\n结论：**passed**\n\n" + "内容。" * 100, encoding="utf-8"
+            )
+            code, out = p.run("release", "--legacy-regression")
+            self.assertEqual(code, 0, out)
+            self.assertIn("降级", out)
+            self.assertEqual(p.run("release-ready")[0], 0)
         finally:
             p.close()
 

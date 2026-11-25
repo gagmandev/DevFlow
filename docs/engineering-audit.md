@@ -1,9 +1,11 @@
-# DevFlow 工程质量审计（V1 → V1.1）
+# DevFlow 工程质量审计（V1 → V1.2）
 
 - 审计时间：2026-11-25
 - 审计范围：`SKILL.md`、`scripts/`、`schemas/`、`config/`、`templates/`、`references/`、`tests/`、`examples/sample-project/`
 - 结论：架构成立（文件驱动 + 单写者 + 证据门槛），但**校验层偏软**——
   多个关键约束只打印警告、不改变状态，等于没有约束。
+- 分轮次实施：第一轮 P0（证据 / 范围 / 锁 / 事务 / 交付状态机）已提交；
+  第二轮 P1（需求覆盖、回归 JSON、Git 核对、并行冲突、版本绑定）见第七、八节。
 
 ## 一、当前架构
 
@@ -65,7 +67,7 @@ schemas/            6 个 JSON Schema
 | 旧节点无 `current_attempt_id` | 视为"历史节点"，跳过 attempt 绑定校验；新 `start` 才写入 |
 | 旧 `test-report.json` 无 `attempt_id` | 仅对**新尝试**强制；已 completed 的历史节点不受影响 |
 | 旧 `backlog-vN.json` 无新字段 | Schema 中全部为可选；`plan-import` 归一化时补默认值 |
-| 旧回归 Markdown 报告 | `release` 仍接受 Markdown 作为降级依据，但要求包含结论段；JSON 校验在 P1 实现 |
+| 旧回归 Markdown 报告 | `release` 仍接受 Markdown 作为降级依据，但要求包含结论段；第二轮起以 JSON 为准 |
 
 ## 五、修复方案（本轮 P0）
 
@@ -86,7 +88,75 @@ schemas/            6 个 JSON Schema
 | 端到端 | 现有 `LifecycleTest` 扩展为 start → sync → accept → regression → release → release-ready → release-accept |
 | 回归 | 引擎 37 条 + 示例项目 74 条必须继续全绿 |
 
-## 七、不在本轮范围
+## 七、第二轮：P1 工作流正确性
 
-P1（回归 JSON 报告、CR 版本冲突检测、并行安全、提示词版本绑定、Git 变更核对、sync 外部导入）
-与 P2（SKILL.md 瘦身、上下文变更检测、self-test）留到后续轮次。
+### 7.1 缺陷清单
+
+| 编号 | 位置 | 缺陷 | 影响 |
+| --- | --- | --- | --- |
+| D-19 | `df.py cmd_regression_check` | `uncovered` 只打印，不进退出码 | 需求没覆盖也能进回归 |
+| D-20 | `df.py cmd_regression_check` | 需求改 `deferred`/`inactive` 即可绕过覆盖 | 逃逸门 |
+| D-21 | `df.py cmd_release` | 只看 Markdown 是否存在，没有机器可读回归结论 | 报告存在 ≠ 回归通过 |
+| D-22 | `df.py cmd_sync` | `ready` 可隐式转 `in_progress`；外部报告无导入入口 | 绕过依赖/执行身份 |
+| D-23 | 全流程 | 报告声称改了哪些文件，没人核对工作区实际变更 | 虚报改动无法发现 |
+| D-24 | `df.py cmd_change_apply` | 不校验 `base_plan_version` / `base_requirement_version` | 过期影响分析被直接套用 |
+| D-25 | `validate.py` 并行组 | 只查直接依赖与文件重叠，警告不阻断；把"同层"当安全 | 间接依赖 + 同表/同接口并行 |
+| D-26 | `templates/node-prompt.md` | 提示词不绑定计划/需求版本 | 计划变了仍按旧提示词开发 |
+
+另发现两处实现级缺陷（本轮修复）：
+
+1. `change-apply` 的基准校验用 `if base_plan and ...`，`base_plan_version=0`
+   （CR 创建时还没有计划）会因为 0 是 falsy 被跳过，等于给过期基准开后门。
+   已改为 `is not None` 显式判断。
+2. `regression-check` 不检查当前项目状态，在 `accepted` 项目上重跑会把状态改回
+   `regression`（本次调试示例项目时实际触发）。已补 `accepted` 终态保护：
+   节点类与交付类命令在 `accepted` 后全部拒绝，只能通过变更流程回到 `in_progress`。
+
+### 7.2 修复对应
+
+| 编号 | 修复 |
+| --- | --- |
+| P1-1 | `regression-check`：未完成/failed/blocked 节点、证据不齐、需求无覆盖或只有 `no_test` 覆盖、需求改非 active 缺 `reason`+`confirmed_by`、需求验收项无 `met=true` 证据 —— 全部计入 `blockers` 并退出码 1 |
+| P1-2 | 新增 `schemas/regression-report.schema.json`、`templates/regression-report.json`；`regression-import` 做 Schema + 语义校验后写 `final-report.json` 并渲染 `.md`；`release` 读 JSON |
+| P1-3 | `sync` 只接受 `in_progress`；新增 `--external --from <dir>` 导入通道，只搬文件 + 校验 `node_id`/`attempt_id`，之后走同一套证据/范围/依赖校验 |
+| P1-4 | `core.git_snapshot` / `core.git_changes_since`：`start` 记录 HEAD + 已有脏文件，`sync` 求差集并写入 `git_actual_changes` / `git_discrepancies`；`verify_changes: warn/error/off` |
+| P1-5 | `change-apply` 校验基准版本、目标计划归属、目标需求版本、迁移关系；全部不满足就拒绝 |
+| P1-6 | `core.parallel_issues` 统一判定：直接/间接依赖、`files_scope`、`db_objects`、`api_contracts`、`shared_config`；`validate` 阻断，`dependency_check`/`graph` 同步报告；例外需 `parallel_exceptions`（group + reason + approved_by） |
+| P1-7 | 提示词头部写 `project_id`/`node_id`/`plan_version`/`requirement_version`/`prompt_version`；`start` 校验，`validate --activating` 也校验 |
+
+### 7.3 修改涉及的文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/df.py` | 回归前置检查硬阻断、`regression-import`、`sync --external`、Git 核对、CR 基准校验、提示词版本绑定、`accepted` 终态守卫、旧报告/旧提示词归档 |
+| `scripts/dfcore.py` | `git_snapshot`/`git_changes_since`、`parse_prompt_meta`/`prompt_binding_problems`、`migration_problems`、`requirement_retirement_problems`、`parallel_issues` 及路径/资源冲突辅助函数 |
+| `scripts/validate.py` | `activating` 模式、提示词版本校验、并行冲突改为错误、迁移关系校验 |
+| `scripts/dependency_check.py` | 并入并行冲突判定（与 validate 同源），分层说明改为"仅候选" |
+| `schemas/*.json` | `node` 增 `prompt_version`/`git_*`/`db_objects` 等；`backlog` 增 `parallel_exceptions`；新增 `regression-report` |
+| `config/quality-gates.yaml` | `regression.required_checks`、`git.verify_changes` |
+| `templates/` | 新增 `regression-report.json` |
+| `tests/test_p1_workflow.py` | P1 全部场景（新增 34 条） |
+
+### 7.4 数据兼容
+
+| 风险 | 处理 |
+| --- | --- |
+| 旧节点没有提示词元数据 | `plan-activate` 前必须 `prompt-init --force` 重新生成；已 completed 的节点不校验 |
+| 旧项目只有 Markdown 回归报告 | `release --legacy-regression` 降级，并在 `project.json` 记 `legacy_regression_accepted` |
+| 旧节点没有 `git_baseline` | `git_changes_since` 返回 `None`，跳过核对（不是失败） |
+| 旧节点无 `current_attempt_id` | 需求验收证据检查跳过（不追溯旧项目） |
+| 旧计划无 `parallel_exceptions` | 字段可选；没有例外时冲突直接报错 |
+
+### 7.5 测试
+
+| 层 | 覆盖 |
+| --- | --- |
+| 单元 | 需求覆盖 5 类、回归报告 6 类、外部报告 3 类、Git 2 类、并行 4+4 类、提示词 2 类、迁移 4 类、CR 基准 5 类 |
+| 端到端 | 引擎 117 条 + 示例项目 74 条全绿 |
+| 手工 | `df.py graph` / `df.py doctor` 在示例项目上通过 |
+
+## 八、尚未处理（P2）
+
+- `SKILL.md` 进一步瘦身（把业务细则拆到 `references/`，按需加载）。
+- 项目上下文变更检测（关键交付物 SHA256 / commit / 契约版本 → 提示下游重评估）。
+- `df.py self-test` 端到端集成验收流程（临时目录跑完整生命周期）。

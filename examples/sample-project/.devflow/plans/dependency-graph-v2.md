@@ -27,7 +27,7 @@ graph TD
   DF_003 --> DF_008
 ```
 
-## 分层（同层无依赖，可作并行候选）
+## 分层（同层无依赖，仅作并行候选）
 
 - L1：DF-001
 - L2：DF-002
@@ -35,6 +35,13 @@ graph TD
 - L4：DF-004, DF-005, DF-008
 - L5：DF-006
 - L6：DF-007
+
+> 同层只说明「没有依赖」，不说明「改的代码不冲突」。要并行请显式配 `parallel_group`，
+> 校验器会检查依赖可达性、`files_scope`、`db_objects`、`api_contracts`、`shared_config`。
+
+## 并行组
+
+- 组 A：DF-004, DF-005
 
 ## 依赖明细
 
