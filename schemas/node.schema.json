@@ -121,6 +121,42 @@
       "minimum": 0,
       "description": "提示词版本；每次 prompt-init 递增"
     },
+    "deliverables": {
+      "type": ["object", "null"],
+      "description": "accept 时记录的交付物指纹；下游用它判断依赖产物是否被改过",
+      "properties": {
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "sha256": { "type": "string" },
+              "size": { "type": "integer" },
+              "mtime": { "type": "integer" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "plan_version": { "type": ["integer", "null"] },
+        "recorded_at": { "type": "string" },
+        "git_head": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "context_acks": {
+      "type": "array",
+      "description": "依赖产物变更后，主控确认「不影响本节点」的记录",
+      "items": {
+        "type": "object",
+        "required": ["reason", "at"],
+        "properties": {
+          "reason": { "type": "string", "minLength": 1 },
+          "at": { "type": "string" },
+          "changes": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
     "git_baseline": {
       "type": ["object", "null"],
       "description": "start 时记录的 Git 基准：head、已有未提交文件",

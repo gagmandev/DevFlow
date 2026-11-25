@@ -911,6 +911,25 @@ def cmd_start(args) -> int:
             + f"\n重新生成：df.py prompt-init {node['node_id']} --force"
         )
 
+    # 上下文变更：依赖产物在本节点开工前被改过，先让主控重新评估影响
+    changes = core.context_changes(paths, plan, node)
+    if changes:
+        ack = getattr(args, "ack_context", False)
+        reason = getattr(args, "reason", None)
+        if not (ack and reason):
+            raise DevFlowError(
+                "依赖产物在执行期间发生了变化，先评估影响再开工：\n  - "
+                + "\n  - ".join(changes)
+                + "\n如果确认不影响本节点，用："
+                f"df.py start {node['node_id']} --ack-context --reason \"为什么不影响\""
+            )
+        node.setdefault("context_acks", []).append({
+            "reason": reason,
+            "at": core.now_iso(),
+            "changes": changes,
+        })
+        print(f"! 已记录上下文变更确认：{reason}")
+
     prev_status = node["status"]
     transition(node, "in_progress", owner=args.owner or "code-agent", started_at=core.now_iso())
     _new_attempt(node)
@@ -1174,8 +1193,14 @@ def cmd_accept(args) -> int:
         return 1
 
     transition(node, "completed", completed_at=core.now_iso(), accepted_by=args.by or "user")
+    # 记录交付物指纹：下游开工时用它对一下"依赖产物有没有被改"
+    snapshot = core.deliverable_snapshot(paths, node)
+    snapshot["plan_version"] = plan["plan_version"]
+    node["deliverables"] = snapshot
     unlocked = refresh(project, plan, quiet=True)
     print(f"✓ {node['node_id']} {node['node_name']} 验收通过")
+    if snapshot["files"]:
+        print(f"交付物指纹已记录：{len(snapshot['files'])} 个文件")
     if unlocked:
         print(f"新解锁：{', '.join(unlocked)}")
     st = core.stats(plan)
@@ -2213,6 +2238,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("start", cmd_start, "开始执行节点")
     p.add_argument("node_id")
     p.add_argument("--owner", default=None)
+    p.add_argument("--ack-context", action="store_true",
+                   help="确认依赖产物变更不影响本节点（需同时给 --reason）")
+    p.add_argument("--reason", default=None, help="上下文变更确认理由（必填）")
 
     p = add("sync", cmd_sync, "同步执行报告")
     p.add_argument("node_id")

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -877,6 +878,112 @@ def git_changes_since(root: Path, baseline: dict | None) -> list[str] | None:
         p for p in changes
         if p and not p.startswith(DF_DIRNAME + "/") and not p.startswith("./")
     )
+
+
+# --------------------------------------------------------------------------
+# 交付物快照：下游开工前检查依赖产物是否变了
+# --------------------------------------------------------------------------
+#
+# 只在**声明的依赖产物**上做比对（node.inputs + 依赖节点的 outputs），
+# 不对整个工作区做"文件一变就全部失效"——文档改一行不应该让所有下游重做。
+
+#: 单个文件做快照的大小上限，超过只记大小和 mtime（避免给大二进制算哈希）
+SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024
+
+
+def file_fingerprint(path: Path) -> dict | None:
+    """文件指纹：小文件记 sha256，大文件记 size+mtime。文件不存在返回 None。"""
+    try:
+        if not path.is_file():
+            return None
+        stat = path.stat()
+    except OSError:
+        return None
+    if stat.st_size > SNAPSHOT_MAX_BYTES:
+        return {"size": stat.st_size, "mtime": int(stat.st_mtime)}
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return {"sha256": digest.hexdigest(), "size": stat.st_size}
+
+
+def deliverable_paths(node: dict) -> list[str]:
+    """一个节点承诺的交付物：outputs 优先，没有就退回 files_scope 里的具体文件。"""
+    paths: list[str] = []
+    for raw in (node.get("outputs") or []) + (node.get("files_scope") or []):
+        if not isinstance(raw, str):
+            continue
+        try:
+            norm = normalize_rel(raw)
+        except ValueError:
+            continue
+        if any(ch in norm for ch in "*?"):
+            continue
+        if norm not in paths:
+            paths.append(norm)
+    return paths
+
+
+def deliverable_snapshot(paths: Paths, node: dict) -> dict:
+    """记录节点当前交付物指纹。只记真实存在的文件。"""
+    files = {}
+    for rel in deliverable_paths(node):
+        fingerprint = file_fingerprint(paths.root / rel)
+        if fingerprint:
+            files[rel] = fingerprint
+    return {
+        "files": files,
+        "plan_version": None,
+        "recorded_at": now_iso(),
+        "git_head": (git_snapshot(paths.root) or {}).get("head"),
+    }
+
+
+def _same_fingerprint(a: dict | None, b: dict | None) -> bool:
+    if not a or not b:
+        return False
+    if "sha256" in a or "sha256" in b:
+        return a.get("sha256") == b.get("sha256") and a.get("sha256") is not None
+    return a.get("size") == b.get("size") and a.get("mtime") == b.get("mtime")
+
+
+def context_changes(paths: Paths, plan: dict, node: dict) -> list[str]:
+    """开工前检查：声明依赖过的产物是否在执行期间被改过。
+
+    判定范围：本节点 `inputs` 中、且被某个直接依赖记录为交付物的文件。
+    `inputs` 为空时不做推断（没有声明就不猜，避免误伤）。
+    """
+    by_id = {n["node_id"]: n for n in plan.get("nodes", [])}
+    inputs = []
+    for raw in node.get("inputs") or []:
+        if not isinstance(raw, str):
+            continue
+        try:
+            inputs.append(normalize_rel(raw))
+        except ValueError:
+            continue
+    if not inputs:
+        return []
+
+    problems: list[str] = []
+    for dep_id in node.get("dependencies") or []:
+        dep = by_id.get(dep_id)
+        if not dep:
+            continue
+        recorded = (dep.get("deliverables") or {}).get("files") or {}
+        for rel in inputs:
+            if rel not in recorded:
+                continue
+            current = file_fingerprint(paths.root / rel)
+            if current is None:
+                problems.append(f"{rel} 已不存在（{dep_id} 交付时存在）")
+            elif not _same_fingerprint(recorded[rel], current):
+                problems.append(f"{rel} 在 {dep_id} 完成之后被修改过")
+    return problems
 
 
 # --------------------------------------------------------------------------
