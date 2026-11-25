@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "devflow/project.schema.json",
+  "title": "DevFlow 项目档案",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "project_name",
+    "project_type",
+    "status",
+    "created_at",
+    "updated_at",
+    "current_plan_version",
+    "current_requirement_version"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "project_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "project_name": { "type": "string", "minLength": 1 },
+    "project_type": {
+      "type": "string",
+      "enum": ["greenfield", "existing", "refactor"],
+      "description": "greenfield=全新项目；existing=在已有代码库上开发；refactor=重大重构"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "initialized",
+        "analyzing",
+        "clarifying",
+        "requirements_confirmed",
+        "planned",
+        "in_progress",
+        "regression",
+        "released"
+      ]
+    },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "current_plan_version": { "type": ["integer", "null"], "minimum": 1 },
+    "current_requirement_version": { "type": ["integer", "null"], "minimum": 1 },
+    "tech_stack": {
+      "type": "object",
+      "description": "语言/框架/数据库/测试框架/构建方式等，键名自由",
+      "additionalProperties": true
+    },
+    "commands": {
+      "type": "object",
+      "properties": {
+        "install": { "type": ["string", "null"] },
+        "build": { "type": ["string", "null"] },
+        "test": { "type": ["string", "null"] },
+        "lint": { "type": ["string", "null"] },
+        "run": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "硬约束：不得引入的依赖、必须遵循的目录规范、兼容性要求等"
+    },
+    "conventions": {
+      "type": "object",
+      "description": "命名规范、分层约定、错误码规范等",
+      "additionalProperties": true
+    },
+    "analysis": {
+      "type": "object",
+      "description": "项目环境分析结果（模块 1）",
+      "additionalProperties": true
+    },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": false
+}

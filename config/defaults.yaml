@@ -1,0 +1,35 @@
+# DevFlow 全局默认值
+# 只支持本文件用到的 YAML 子集：缩进映射、`- ` 列表、标量、# 注释。
+# 想写更复杂的结构请直接改用同名 .json 文件（引擎优先读 .json）。
+
+schema_version: "1.0"
+
+project:
+  data_dir: .devflow
+  default_type: greenfield
+  # 初始化时自动在 .gitignore 追加忽略项（false 表示不动 .gitignore）
+  update_gitignore: true
+
+workflow:
+  # 需求未确认时禁止生成生效计划
+  require_requirement_confirmation: true
+  # 计划必须人工确认后才能激活
+  require_plan_approval: true
+  # 单节点自测失败后的自动修复轮数上限
+  max_auto_fix_rounds: 2
+  # 同时执行的任务数上限（仅用于并行组建议）
+  max_parallel_nodes: 3
+  # 执行 Agent 不允许写全局计划文件（由主控写入）
+  executor_can_write_board: false
+
+ids:
+  node_prefix: "DF-"
+  requirement_prefix: "REQ-"
+  change_prefix: "CR-"
+  node_width: 3
+
+reports:
+  # 执行报告缺失时是否阻止节点验收
+  require_execution_report: true
+  # 测试证据缺失时是否阻止节点验收
+  require_test_report: true

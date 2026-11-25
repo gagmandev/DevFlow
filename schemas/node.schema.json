@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "devflow/node.schema.json",
+  "title": "DevFlow 任务节点",
+  "type": "object",
+  "required": [
+    "node_id",
+    "node_name",
+    "phase",
+    "type",
+    "priority",
+    "description",
+    "requirement_ids",
+    "dependencies",
+    "parallelizable",
+    "acceptance_criteria",
+    "inputs",
+    "outputs",
+    "files_scope",
+    "test_strategy",
+    "status",
+    "prompt_file"
+  ],
+  "properties": {
+    "node_id": { "type": "string", "pattern": "^DF-[0-9]{3,}$" },
+    "node_name": { "type": "string", "minLength": 1 },
+    "phase": {
+      "type": "string",
+      "enum": ["Foundation", "Shared", "Business", "Integration", "Release"]
+    },
+    "type": {
+      "type": "string",
+      "enum": ["infrastructure", "shared", "business", "integration", "release"]
+    },
+    "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+    "description": { "type": "string", "minLength": 1 },
+    "requirement_ids": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^REQ-[0-9]{3,}$" }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^DF-[0-9]{3,}$" },
+      "description": "前置节点 ID；必须全部 completed 本节点才可执行"
+    },
+    "parallelizable": { "type": "boolean" },
+    "parallel_group": { "type": ["string", "null"] },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "inputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "必须阅读的文件/产物，相对项目根目录"
+    },
+    "outputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "交付物（文件或能力），相对项目根目录"
+    },
+    "files_scope": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "允许修改的文件/目录范围；空数组表示仅允许新增 outputs 中列出的文件"
+    },
+    "test_strategy": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "测试方案：要覆盖的场景与命令"
+    },
+    "no_test": {
+      "type": "boolean",
+      "default": false,
+      "description": "true 表示该节点确实无需自动化测试（如纯文档），必须同时给出 no_test_reason"
+    },
+    "no_test_reason": { "type": ["string", "null"] },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "in_progress",
+        "needs_review",
+        "completed",
+        "blocked",
+        "failed",
+        "superseded",
+        "cancelled"
+      ]
+    },
+    "prompt_file": { "type": "string" },
+    "context_file": { "type": ["string", "null"] },
+    "execution_report": { "type": ["string", "null"] },
+    "test_report": { "type": ["string", "null"] },
+    "owner": { "type": ["string", "null"] },
+    "attempts": { "type": "integer", "minimum": 0, "default": 0 },
+    "started_at": { "type": ["string", "null"] },
+    "completed_at": { "type": ["string", "null"] },
+    "accepted_by": { "type": ["string", "null"] },
+    "created_in_plan": { "type": ["integer", "null"] },
+    "superseded_by": { "type": ["string", "null"] },
+    "blocked_reason": { "type": ["string", "null"] },
+    "remark": { "type": "string" }
+  },
+  "additionalProperties": false
+}

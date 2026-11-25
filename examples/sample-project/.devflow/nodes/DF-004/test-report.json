@@ -1,0 +1,46 @@
+{
+  "node_id": "DF-004",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:53:00+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -p \"test_service.py\" -v",
+      "exit_code": 0,
+      "output_file": null
+    },
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_idempotent", "result": "pass", "detail": "重复开户只一个账户" },
+    { "name": "test_rejects_empty_user_id", "result": "pass", "detail": "空 user_id 拒绝" },
+    { "name": "test_first_check_in_credits_ten", "result": "pass", "detail": "+10 并写一条流水" },
+    { "name": "test_same_day_second_check_in_does_nothing", "result": "pass", "detail": "幂等" },
+    { "name": "test_next_day_credits_again", "result": "pass", "detail": "注入 clock 跨天" },
+    { "name": "test_check_in_unknown_user", "result": "pass", "detail": "AccountNotFound" },
+    { "name": "test_rounding_down", "result": "pass", "detail": "1999→19 / 100→1 / 99→0" },
+    { "name": "test_duplicate_order_not_credited_twice", "result": "pass", "detail": "订单号幂等" },
+    { "name": "test_invalid_amount", "result": "pass", "detail": "0 与负数拒绝" },
+    { "name": "test_redeem_success", "result": "pass", "detail": "扣减成功" },
+    { "name": "test_insufficient_has_no_side_effect", "result": "pass", "detail": "余额与流水均不变" },
+    { "name": "test_redeem_to_zero_allowed", "result": "pass", "detail": "可扣到 0" },
+    { "name": "test_duplicate_source_rejected", "result": "pass", "detail": "DuplicateRequest" },
+    { "name": "test_redeem_rejects_non_positive", "result": "pass", "detail": "0 拒绝" },
+    { "name": "test_shape_and_math", "result": "pass", "detail": "available 计算正确" },
+    { "name": "test_unknown_user", "result": "pass", "detail": "AccountNotFound" },
+    { "name": "test_balance_equals_ledger_sum", "result": "pass", "detail": "余额 = 流水累计" }
+  ],
+  "not_run_reason": null,
+  "notes": "全量 47 条通过：Ran 47 tests in 1.650s / OK"
+}

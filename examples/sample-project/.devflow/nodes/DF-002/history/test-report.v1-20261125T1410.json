@@ -1,0 +1,34 @@
+{
+  "node_id": "DF-002",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:44:10+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 15,
+    "passed": 15,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_account_available", "result": "pass", "detail": "available = balance - frozen" },
+    { "name": "test_account_rejects_float", "result": "pass", "detail": "float 被拒绝" },
+    { "name": "test_account_roundtrip", "result": "pass", "detail": "序列化往返一致" },
+    { "name": "test_ledger_amount_signed", "result": "pass", "detail": "负 amount 保留" },
+    { "name": "test_ledger_rejects_zero", "result": "pass", "detail": "0 金额被拒绝" },
+    { "name": "test_read_missing_file_returns_empty", "result": "pass", "detail": "空结构" },
+    { "name": "test_write_creates_parent_and_roundtrips", "result": "pass", "detail": "自动建目录" },
+    { "name": "test_no_tmp_file_left", "result": "pass", "detail": "无 .tmp 残留" },
+    { "name": "test_corrupted_file_raises", "result": "pass", "detail": "坏 JSON 抛 StorageError" },
+    { "name": "test_written_file_is_valid_json", "result": "pass", "detail": "落盘可解析" }
+  ],
+  "not_run_reason": null,
+  "notes": "本节点新增 10 条；全量 15 条，Ran 15 tests in 0.066s / OK"
+}

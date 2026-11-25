@@ -1,0 +1,29 @@
+{
+  "node_id": "DF-005",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:53:30+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -p \"test_queries.py\" -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_by_user_desc", "result": "pass", "detail": "倒序 + total" },
+    { "name": "test_all_without_user_id", "result": "pass", "detail": "全量视图" },
+    { "name": "test_time_range_left_closed_right_open", "result": "pass", "detail": "左闭右开" },
+    { "name": "test_page_out_of_range", "result": "pass", "detail": "越界空列表" },
+    { "name": "test_size_clamped", "result": "pass", "detail": "size 夹取到 100" }
+  ],
+  "not_run_reason": null,
+  "notes": "Ran 5 tests in 0.097s / OK"
+}

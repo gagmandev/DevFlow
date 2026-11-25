@@ -1,0 +1,34 @@
+{
+  "node_id": "DF-003",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:47:20+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 25,
+    "passed": 25,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_get_missing_returns_none", "result": "pass", "detail": "不存在返回 None" },
+    { "name": "test_get_or_create_is_idempotent", "result": "pass", "detail": "只产生一个账户" },
+    { "name": "test_get_or_create_rejects_empty", "result": "pass", "detail": "空 user_id 抛 InvalidArgument" },
+    { "name": "test_save_increments_version", "result": "pass", "detail": "version 0→1" },
+    { "name": "test_append_and_query_desc", "result": "pass", "detail": "倒序" },
+    { "name": "test_exists", "result": "pass", "detail": "来源幂等查询" },
+    { "name": "test_page_size_clamped_to_100", "result": "pass", "detail": "size=1000 截断" },
+    { "name": "test_time_range_left_closed_right_open", "result": "pass", "detail": "左闭右开" },
+    { "name": "test_out_of_range_page_returns_empty", "result": "pass", "detail": "越界页空列表" },
+    { "name": "test_filter_by_user", "result": "pass", "detail": "按用户过滤" }
+  ],
+  "not_run_reason": null,
+  "notes": "本节点新增 10 条；全量 25 条，Ran 25 tests in 1.495s / OK"
+}

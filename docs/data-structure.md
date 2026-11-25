@@ -1,0 +1,163 @@
+# 数据结构说明
+
+## 一、目录总览
+
+```
+<project>/
+└── .devflow/
+    ├── project.json                    项目档案（唯一）
+    ├── decisions.md                    决策记录
+    ├── requirements/
+    │   ├── source/                     原始需求副本（只读）
+    │   ├── clarification.md            澄清问答
+    │   ├── confirmed-requirements-vN.md 需求基准（按版本）
+    │   ├── traceability-vN.json        需求追踪（按版本，保留历史）
+    │   └── traceability.json           当前版本的副本
+    ├── plans/
+    │   ├── backlog-vN.json             计划（按版本，只增不改）
+    │   ├── board-vN.md                 看板（由 JSON 渲染）
+    │   ├── dependency-graph-vN.md      依赖图
+    │   └── .history/                   被 --force 覆盖前的备份
+    ├── nodes/
+    │   └── DF-001/
+    │       ├── prompt.md               节点提示词（冷启动可执行）
+    │       ├── context.md              可选：额外上下文
+    │       ├── execution-report.md     执行报告（含证据块）
+    │       ├── test-report.json        测试证据（机器读）
+    │       ├── test-report.md          可选：人读明细
+    │       └── history/                返工前的旧报告
+    ├── changes/
+    │   └── CR-001/
+    │       ├── change-request.md       变更说明（人读）
+    │       ├── change-request.json     变更记录（机器读）
+    │       └── impact-assessment.md    影响评估
+    ├── regression/
+    │   ├── precheck.md                 回归前置检查
+    │   └── final-report.md             回归报告
+    └── releases/
+        └── release-report.md           交付报告
+```
+
+## 二、project.json
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `schema_version` | string | `"1.0"` |
+| `project_id` | string | 小写字母数字与 `-`，用于跨文件关联 |
+| `project_name` | string | 展示名 |
+| `project_type` | enum | `greenfield` / `existing` / `refactor` |
+| `status` | enum | `initialized` → `analyzing` → `clarifying` → `requirements_confirmed` → `planned` → `in_progress` → `regression` → `released` |
+| `current_plan_version` | int/null | 生效计划版本；空表示还没有 |
+| `current_requirement_version` | int/null | 生效需求基准版本 |
+| `tech_stack` | object | 语言、框架、存储、测试框架 |
+| `commands` | object | `install` / `build` / `test` / `lint` / `run`，**必须可直接执行** |
+| `constraints` | string[] | 硬约束（禁止的依赖、必须遵循的规范） |
+| `conventions` | object | 命名、分层、错误处理约定 |
+| `analysis` | object | 环境分析结论 |
+| `notes` | string | 项目目标与范围 |
+
+## 三、backlog-vN.json
+
+| 字段 | 说明 |
+| --- | --- |
+| `plan_version` | 与文件名一致 |
+| `requirement_version` | 基于哪一版需求基准 |
+| `status` | `draft`（待审核）/ `active`（生效）/ `superseded` / `rejected` |
+| `approved_at` / `approved_by` | 谁在什么时候批准 |
+| `based_on` | `{plan_version, change_id}`，变更产生的新版计划才有 |
+| `nodes` | 节点数组 |
+
+### 节点字段
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `node_id` | ✓ | `DF-001` 格式，三位起 |
+| `node_name` | ✓ | 一句话说清交付什么 |
+| `phase` | ✓ | Foundation / Shared / Business / Integration / Release |
+| `type` | ✓ | infrastructure / shared / business / integration / release |
+| `priority` | ✓ | P0–P3 |
+| `description` | ✓ | 目标，不要写"优化"这种不可验收的 |
+| `requirement_ids` | ✓ | 关联的 REQ 编号，基础设施可为空 |
+| `dependencies` | ✓ | 前置节点 ID，必须全部 completed |
+| `parallelizable` | ✓ | 是否可并行 |
+| `parallel_group` | | 组名，如 `A`；同组必须无依赖、文件不重叠 |
+| `acceptance_criteria` | ✓ | 至少 1 条，可判断真假 |
+| `inputs` | ✓ | 必读文件 |
+| `outputs` | ✓ | 交付物 |
+| `files_scope` | ✓ | 允许修改的范围（并发安全的核心） |
+| `test_strategy` | ✓ | 要覆盖的场景 |
+| `no_test` / `no_test_reason` | | 纯文档节点用，必须给理由 |
+| `status` | ✓ | 见状态机 |
+| `prompt_file` | ✓ | 默认 `.devflow/nodes/<ID>/prompt.md` |
+| `execution_report` / `test_report` | | 为空时按约定路径推导 |
+| `owner` / `attempts` | | 谁在做、尝试了几次 |
+| `started_at` / `completed_at` / `accepted_by` | | 时间线 |
+| `superseded_by` | | 被哪个节点取代 |
+| `blocked_reason` | | 阻塞原因，`blocked` 必填 |
+| `remark` | | 备注；返工、reusable 判定理由写这里 |
+
+## 四、节点状态机
+
+| 状态 | 含义 | 可迁移到 |
+| --- | --- | --- |
+| `pending` | 待执行，依赖未满足 | ready, blocked, cancelled, superseded |
+| `ready` | 依赖已满足 | in_progress, pending, blocked, cancelled, superseded |
+| `in_progress` | 执行中 | needs_review, failed, blocked, cancelled, ready |
+| `needs_review` | 待验收 | completed, in_progress, failed, blocked |
+| `completed` | 已验收 | superseded |
+| `failed` | 执行失败 | in_progress, blocked, cancelled, superseded |
+| `blocked` | 阻塞 | ready, in_progress, failed, cancelled, superseded |
+| `superseded` | 被新版取代 | — |
+| `cancelled` | 已取消 | — |
+
+自动行为：任何状态变更后，依赖全部 completed 的 `pending` 节点自动变 `ready`。
+**不会**自动把 `ready` 退回 `pending`。
+
+## 五、test-report.json
+
+```json
+{
+  "node_id": "DF-004",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:53:00+08:00",
+  "executed_by": "code-agent",
+  "commands": [{"cmd": "python -m unittest ...", "exit_code": 0, "output_file": null}],
+  "summary": {"total": 17, "passed": 17, "failed": 0, "skipped": 0},
+  "coverage": {"tool": "coverage.py", "line": 0.82, "branch": null},
+  "cases": [{"name": "test_x", "result": "pass", "detail": "..."}],
+  "not_run_reason": null,
+  "notes": ""
+}
+```
+
+验收要求：`status=passed`、`commands` 非空且退出码 0、`summary.failed=0`、`node_id` 对得上。
+
+## 六、不变量
+
+这些必须永远成立，`validate.py` 会检查：
+
+1. 同一时间只有一个 `active` 计划，且等于 `project.current_plan_version`
+2. 计划里 `node_id` 唯一
+3. 依赖指向的节点存在，且不成环
+4. `ready` / `in_progress` / `needs_review` 的节点，依赖全部 completed
+5. `completed` 节点有执行报告 + 测试证据（或 `no_test` + 理由）
+6. `parallel_group` 内成员之间没有依赖
+7. 节点引用的 `REQ-xxx` 在追踪表里存在
+8. `plan_version` 与文件名一致，`project_id` 与项目档案一致
+
+## 七、文件命名约定
+
+| 类型 | 规则 |
+| --- | --- |
+| 计划 / 看板 / 依赖图 | `backlog-vN.json` / `board-vN.md` / `dependency-graph-vN.md` |
+| 需求 | `confirmed-requirements-vN.md` / `traceability-vN.json` |
+| 节点 | `DF-001` 目录，ID 不复用 |
+| 变更 | `CR-001` 目录，ID 不复用 |
+| 归档 | `history/<原名>.<时间戳>.<扩展名>` |
+
+## 八、Git 建议
+
+提交：`.devflow/` 下除锁文件外的全部内容。
+忽略：`.devflow/.lock`、`.devflow/**/*.tmp`（`init` 会自动写进 `.gitignore`）。
+
+计划变更、需求变更、报告更新都能 diff，这是 DevFlow 最有价值的部分之一。

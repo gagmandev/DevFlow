@@ -1,0 +1,401 @@
+{
+  "schema_version": "1.0",
+  "project_id": "points-demo",
+  "plan_version": 1,
+  "requirement_version": 1,
+  "status": "superseded",
+  "created_at": "2026-11-25T13:40:18+08:00",
+  "approved_at": "2026-11-25T13:41:13+08:00",
+  "approved_by": "阿墨（演示）",
+  "based_on": null,
+  "stats_note": "",
+  "nodes": [
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "requirements.md"
+      ],
+      "outputs": [
+        "src/points/__init__.py",
+        "src/points/errors.py",
+        "tests/test_errors.py"
+      ],
+      "files_scope": [
+        "src/points/__init__.py",
+        "src/points/errors.py",
+        "tests/test_errors.py"
+      ],
+      "test_strategy": [
+        "断言四个异常都能被捕获且 code 正确",
+        "断言异常继承自 PointsError（统一基类）"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:41:20+08:00",
+      "completed_at": "2026-11-25T13:41:45+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-001",
+      "node_name": "项目骨架与领域异常",
+      "phase": "Foundation",
+      "type": "infrastructure",
+      "priority": "P0",
+      "description": "建立 src/points 包结构、测试入口和领域异常体系，让后续所有节点有统一的错误语义。",
+      "requirement_ids": [],
+      "dependencies": [],
+      "acceptance_criteria": [
+        "python -m unittest discover -s tests -v 可执行并通过",
+        "src/points/errors.py 定义 InvalidArgument / AccountNotFound / InsufficientBalance / DuplicateRequest 四个异常，均带 code 属性",
+        "包可从 src 布局导入（sys.path 处理写在测试里，不改全局环境）"
+      ],
+      "prompt_file": ".devflow/nodes/DF-001/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/errors.py"
+      ],
+      "outputs": [
+        "src/points/models.py",
+        "src/points/store.py",
+        "tests/test_store.py"
+      ],
+      "files_scope": [
+        "src/points/models.py",
+        "src/points/store.py",
+        "tests/test_store.py"
+      ],
+      "test_strategy": [
+        "空文件/不存在文件的读取",
+        "写入后重新读取内容一致",
+        "写入过程不留下 .tmp 文件",
+        "非法 JSON 文件读取时抛 StorageError 而不是静默清空"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:41:51+08:00",
+      "completed_at": "2026-11-25T13:42:17+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-002",
+      "node_name": "账户与流水数据结构 + 原子存储",
+      "phase": "Foundation",
+      "type": "infrastructure",
+      "priority": "P0",
+      "description": "定义 Account / LedgerEntry 数据结构与 JSON 原子存储，保证进程中断不产生半截文件。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-008"
+      ],
+      "dependencies": [
+        "DF-001"
+      ],
+      "acceptance_criteria": [
+        "Account 含 user_id/balance/frozen/version/created_at，积分字段为 int",
+        "LedgerEntry 含 entry_id/user_id/type/amount/source_id/created_at/note，amount 为带符号整数",
+        "存储写入使用临时文件 + os.replace，文件不存在时返回空结构而不是报错",
+        "落盘后的文件能被 json.load 正常解析"
+      ],
+      "prompt_file": ".devflow/nodes/DF-002/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/models.py",
+        "src/points/store.py"
+      ],
+      "outputs": [
+        "src/points/repository.py",
+        "tests/test_repository.py"
+      ],
+      "files_scope": [
+        "src/points/repository.py",
+        "tests/test_repository.py"
+      ],
+      "test_strategy": [
+        "同一 user_id 两次 get_or_create 返回同一账户",
+        "分页 size=1000 时截断为 100",
+        "时间区间左闭右开",
+        "exists 命中与未命中"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:42:18+08:00",
+      "completed_at": "2026-11-25T13:42:45+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-003",
+      "node_name": "账户与流水仓储层",
+      "phase": "Shared",
+      "type": "shared",
+      "priority": "P1",
+      "description": "在存储之上提供 AccountRepo / LedgerRepo：开户查询、余额更新、流水追加、按来源单号幂等查询、分页查询。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-008"
+      ],
+      "dependencies": [
+        "DF-002"
+      ],
+      "acceptance_criteria": [
+        "AccountRepo.get_or_create 对同一 user_id 幂等",
+        "AccountRepo.save 更新 version 并原子落盘",
+        "LedgerRepo.exists(user_id, type, source_id) 能判断重复来源",
+        "LedgerRepo.query 支持按用户/时间区间过滤与分页，size 上限 100"
+      ],
+      "prompt_file": ".devflow/nodes/DF-003/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": true,
+      "parallel_group": "A",
+      "inputs": [
+        "src/points/repository.py",
+        "src/points/models.py",
+        "src/points/errors.py"
+      ],
+      "outputs": [
+        "src/points/service.py",
+        "tests/test_service.py"
+      ],
+      "files_scope": [
+        "src/points/service.py",
+        "tests/test_service.py"
+      ],
+      "test_strategy": [
+        "开户幂等（两次调用只一个账户）",
+        "签到幂等（同一天两次只加一次）",
+        "奖励向下取整（1999→19，100→1，99→0）",
+        "扣减成功 / 余额不足 / 扣到 0",
+        "不存在的账户查余额抛 AccountNotFound"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:42:55+08:00",
+      "completed_at": "2026-11-25T13:43:42+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-004",
+      "node_name": "账户服务：开户 / 签到 / 奖励 / 扣减 / 余额",
+      "phase": "Business",
+      "type": "business",
+      "priority": "P1",
+      "description": "实现 WalletService 的核心写路径：开户、签到、订单奖励、兑换扣减、余额查询，并保证并发不超扣。",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-006"
+      ],
+      "dependencies": [
+        "DF-003"
+      ],
+      "acceptance_criteria": [
+        "同一 user_id 重复开户幂等，不产生第二个账户",
+        "当天首次签到 +10，第二次签到返回 already_checked_in 且余额与流水不变",
+        "订单奖励 1999 分 → 19 积分；同一 source_id 重复调用只入账一次",
+        "余额不足时抛 InsufficientBalance，余额与流水均不变",
+        "balance 返回 balance/frozen/available 三个值，available = balance - frozen"
+      ],
+      "prompt_file": ".devflow/nodes/DF-004/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": true,
+      "parallel_group": "A",
+      "inputs": [
+        "src/points/repository.py",
+        "src/points/models.py"
+      ],
+      "outputs": [
+        "src/points/queries.py",
+        "tests/test_queries.py"
+      ],
+      "files_scope": [
+        "src/points/queries.py",
+        "tests/test_queries.py"
+      ],
+      "test_strategy": [
+        "倒序校验",
+        "跨用户查询",
+        "时间区间边界（等于 start 命中、等于 end 不命中）",
+        "分页越界返回空列表"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:42:56+08:00",
+      "completed_at": "2026-11-25T13:43:43+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-005",
+      "node_name": "流水查询与运营视图",
+      "phase": "Business",
+      "type": "business",
+      "priority": "P2",
+      "description": "实现 LedgerQuery：用户查自己的流水、运营按用户/时间查全部流水，统一分页。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-007"
+      ],
+      "dependencies": [
+        "DF-003"
+      ],
+      "acceptance_criteria": [
+        "按用户查询按时间倒序返回",
+        "不传 user_id 时返回全部用户流水",
+        "时间区间左闭右开",
+        "分页 size 超过 100 截断，page 从 1 开始"
+      ],
+      "prompt_file": ".devflow/nodes/DF-005/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/service.py",
+        "src/points/queries.py"
+      ],
+      "outputs": [
+        "tests/test_integration.py",
+        "tests/test_concurrency.py"
+      ],
+      "files_scope": [
+        "tests/test_integration.py",
+        "tests/test_concurrency.py"
+      ],
+      "test_strategy": [
+        "完整链路余额与流水对账",
+        "并发扣减成功次数与余额一致",
+        "并发后余额永不为负"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:43:48+08:00",
+      "completed_at": "2026-11-25T13:44:13+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-006",
+      "node_name": "端到端链路与并发验证",
+      "phase": "Integration",
+      "type": "integration",
+      "priority": "P1",
+      "description": "用真实存储跑完整链路（开户→签到→下单奖励→兑换→查流水→查余额），并用多线程验证不超扣。",
+      "requirement_ids": [
+        "REQ-008"
+      ],
+      "dependencies": [
+        "DF-004",
+        "DF-005"
+      ],
+      "acceptance_criteria": [
+        "端到端链路一条用例跑通，余额与流水累计值一致",
+        "20 线程各扣 1 分、余额 10 分 → 恰好 10 次成功、余额 0、无负余额",
+        "全量测试 python -m unittest discover -s tests -v 全绿"
+      ],
+      "prompt_file": ".devflow/nodes/DF-006/prompt.md",
+      "created_in_plan": 1
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "requirements.md"
+      ],
+      "outputs": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "files_scope": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "test_strategy": [],
+      "no_test": true,
+      "no_test_reason": "纯文档节点，无可执行逻辑；文档中的命令由 DF-006 的回归实际执行验证",
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:44:14+08:00",
+      "completed_at": "2026-11-25T13:44:46+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-007",
+      "node_name": "交付文档与运行说明",
+      "phase": "Release",
+      "type": "release",
+      "priority": "P2",
+      "description": "编写 README（安装、运行、测试、目录说明）与部署/配置说明，明确本期边界与已知限制。",
+      "requirement_ids": [],
+      "dependencies": [
+        "DF-006"
+      ],
+      "acceptance_criteria": [
+        "README 含安装、测试命令、目录结构、本期不做的范围",
+        "部署说明含数据文件位置、并发前提（单机）、备份方式",
+        "文档里的命令都能实际执行"
+      ],
+      "prompt_file": ".devflow/nodes/DF-007/prompt.md",
+      "created_in_plan": 1
+    }
+  ]
+}

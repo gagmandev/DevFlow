@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "project_id": "points-demo",
+  "project_name": "积分账户服务",
+  "project_type": "greenfield",
+  "status": "released",
+  "created_at": "2026-11-25T13:38:54+08:00",
+  "updated_at": "2026-11-25T13:50:48+08:00",
+  "current_plan_version": 2,
+  "current_requirement_version": 2,
+  "tech_stack": {
+    "language": "Python",
+    "version": "3.11+",
+    "runtime_deps": "无（仅标准库）",
+    "storage": "本地 JSON 文件（原子写入）",
+    "test": "unittest",
+    "layout": "src/ 布局"
+  },
+  "commands": {
+    "install": null,
+    "build": null,
+    "test": "python -m unittest discover -s tests -v",
+    "lint": null,
+    "run": "python -m points.cli"
+  },
+  "constraints": [
+    "只使用 Python 标准库，不引入第三方运行时依赖",
+    "积分必须是整数，禁止用 float 表示或参与运算",
+    "任何写操作必须原子落盘，进程中断不能留下半截数据",
+    "余额不允许为负；并发扣减不允许超扣",
+    "不得把密钥、令牌写入代码或报告"
+  ],
+  "conventions": {
+    "目录": "业务代码放 src/points/，测试放 tests/",
+    "错误处理": "领域异常统一定义在 src/points/errors.py，不抛裸 Exception",
+    "命名": "模块与函数 snake_case，类 CamelCase",
+    "存储": "所有落盘走 store.atomic_write，不直接 open('w')"
+  },
+  "analysis": {
+    "project_type_reason": "目录为空，除需求文档外无代码，判定为全新项目",
+    "existing_code": "无",
+    "risks": [
+      "并发扣减需要显式加锁验证",
+      "JSON 文件存储在进程崩溃时的原子性依赖 os.replace"
+    ]
+  },
+  "notes": "积分账户服务：为会员体系提供积分开户、入账、扣减、流水查询能力。本期只做账户与流水，不含积分商城页面、不含支付。"
+}

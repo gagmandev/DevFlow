@@ -1,0 +1,28 @@
+{
+  "node_id": "DF-006",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:56:40+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 51,
+    "passed": 51,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_full_chain", "result": "pass", "detail": "开户→签到→奖励→兑换→流水→余额，24 分对账一致" },
+    { "name": "test_repeat_flow_is_idempotent", "result": "pass", "detail": "重复签到/奖励不重复入账" },
+    { "name": "test_no_overspend", "result": "pass", "detail": "20 线程恰好 10 成功、余额 0、流水 11 条" },
+    { "name": "test_balance_never_negative_under_load", "result": "pass", "detail": "余额 0 时并发全部失败" }
+  ],
+  "not_run_reason": null,
+  "notes": "Ran 51 tests in 1.903s / OK"
+}

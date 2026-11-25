@@ -1,0 +1,30 @@
+{
+  "node_id": "DF-002",
+  "status": "passed",
+  "executed_at": "2026-11-25T14:14:30+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 57,
+    "passed": 57,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_frozen_delta_roundtrip", "result": "pass", "detail": "frozen_delta 往返一致" },
+    { "name": "test_zero_amount_allowed_with_frozen_delta", "result": "pass", "detail": "纯冻结流水合法" },
+    { "name": "test_both_zero_rejected", "result": "pass", "detail": "双零拒绝" },
+    { "name": "test_legacy_row_without_frozen_delta", "result": "pass", "detail": "v1 历史流水默认 0" },
+    { "name": "test_positional_call_still_works", "result": "pass", "detail": "位置参数未错位" },
+    { "name": "test_account_with_frozen", "result": "pass", "detail": "available = 18" }
+  ],
+  "not_run_reason": null,
+  "notes": "全量 57 条通过（v1 的 51 条 + 新增 6 条）；Ran 57 tests in 2.229s / OK"
+}

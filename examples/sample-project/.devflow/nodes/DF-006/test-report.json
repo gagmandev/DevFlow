@@ -1,0 +1,30 @@
+{
+  "node_id": "DF-006",
+  "status": "passed",
+  "executed_at": "2026-11-25T14:25:40+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 74,
+    "passed": 74,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_freeze_blocks_then_unfreeze_restores", "result": "pass", "detail": "冻结→兑换拒绝→解冻→兑换成功" },
+    { "name": "test_two_reconciliations", "result": "pass", "detail": "两条对账公式" },
+    { "name": "test_ledger_contains_freeze_types", "result": "pass", "detail": "流水含 freeze/unfreeze" },
+    { "name": "test_no_over_freeze", "result": "pass", "detail": "20 线程恰好 10 成功，frozen=10" },
+    { "name": "test_no_overspend", "result": "pass", "detail": "v1 并发扣减仍通过" },
+    { "name": "test_balance_never_negative_under_load", "result": "pass", "detail": "v1 用例仍通过" }
+  ],
+  "not_run_reason": null,
+  "notes": "全量 74 条通过（v1 的 70 条 + 新增 4 条）；Ran 74 tests in 2.786s / OK"
+}

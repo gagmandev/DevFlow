@@ -1,0 +1,42 @@
+{
+  "node_id": "DF-008",
+  "status": "passed",
+  "executed_at": "2026-11-25T14:20:10+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -p \"test_freeze.py\" -v",
+      "exit_code": 0,
+      "output_file": null
+    },
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 13,
+    "passed": 13,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_freeze_moves_available_to_frozen", "result": "pass", "detail": "balance 10 / frozen 4 / available 6" },
+    { "name": "test_freeze_insufficient_has_no_side_effect", "result": "pass", "detail": "无副作用" },
+    { "name": "test_duplicate_freeze_rejected", "result": "pass", "detail": "DuplicateRequest" },
+    { "name": "test_freeze_rejects_bad_amount", "result": "pass", "detail": "0/负数/空单号拒绝" },
+    { "name": "test_freeze_unknown_user", "result": "pass", "detail": "AccountNotFound" },
+    { "name": "test_freeze_ledger_entry_shape", "result": "pass", "detail": "amount=0, frozen_delta=4" },
+    { "name": "test_partial_unfreeze", "result": "pass", "detail": "frozen 8→5" },
+    { "name": "test_full_unfreeze", "result": "pass", "detail": "frozen→0" },
+    { "name": "test_unfreeze_more_than_frozen_rejected", "result": "pass", "detail": "InvalidArgument" },
+    { "name": "test_duplicate_unfreeze_rejected", "result": "pass", "detail": "DuplicateRequest" },
+    { "name": "test_reconciliation", "result": "pass", "detail": "两条对账公式成立" },
+    { "name": "test_redeem_uses_available_after_freeze", "result": "pass", "detail": "冻结后兑换按 available 拒绝" },
+    { "name": "test_unfreeze_restores_spending_power", "result": "pass", "detail": "解冻后可用恢复" }
+  ],
+  "not_run_reason": null,
+  "notes": "全量 70 条通过：Ran 70 tests in 2.378s / OK"
+}

@@ -1,0 +1,96 @@
+{
+  "change_id": "CR-001",
+  "title": "退款场景：积分冻结与解冻",
+  "type": "rule_change",
+  "status": "applied",
+  "requested_by": "业务方",
+  "requested_at": "2026-11-25T13:45:08+08:00",
+  "base_requirement_version": 1,
+  "base_plan_version": 1,
+  "target_requirement_version": 2,
+  "target_plan_version": 2,
+  "description": "订单退款后，原先发放的积分不能直接扣减（用户可能已经花掉），改为冻结同等额度：账户 balance 不变，frozen 增加，available 减少；运营确认后在后台解冻（恢复可用）或转为扣减。冻结期间该部分积分不可用于兑换。",
+  "reason": "v1 明确把退款回收列为 OPEN-001。业务方确认退款流程即将上线，必须先支持冻结，否则退款时只能人工改余额，无法审计。",
+  "old_behavior": "只维护 balance，frozen 恒为 0；退款不处理积分，靠人工。",
+  "new_behavior": "新增冻结/解冻能力；冻结与解冻都写流水（记录 frozen_delta，余额不变）；available = balance - frozen 立即生效，兑换自动受约束。",
+  "requirement_ids": [
+    "REQ-009"
+  ],
+  "impacts": [
+    {
+      "node_id": "DF-001",
+      "action": "reusable",
+      "reason": "异常基类与错误码机制不变，冻结复用 InvalidArgument / DuplicateRequest。",
+      "requires_retest": false
+    },
+    {
+      "node_id": "DF-002",
+      "action": "modify",
+      "reason": "LedgerEntry 需新增 frozen_delta 字段，且 amount 在纯冻结流水里为 0；from_dict 必须兼容历史数据（缺字段默认 0），否则已落盘流水读不出来。",
+      "files": [
+        "src/points/models.py",
+        "tests/test_store.py"
+      ],
+      "requires_retest": true
+    },
+    {
+      "node_id": "DF-003",
+      "action": "reusable",
+      "reason": "仓储接口不变；LedgerRepo.exists 可直接用于冻结幂等判断，query 不需要按类型过滤。",
+      "requires_retest": false
+    },
+    {
+      "node_id": "DF-004",
+      "action": "reusable",
+      "reason": "redeem 已经按 account.available 校验余额，冻结后自动生效，无需改代码。这是 v1 预留 available 的收益。",
+      "requires_retest": false
+    },
+    {
+      "node_id": "DF-005",
+      "action": "review",
+      "reason": "流水新增 freeze/unfreeze 类型，查询层不按类型过滤，理论上无需改动；需确认是否需要类型过滤参数。结论：不需要，保持 reusable。",
+      "requires_retest": false
+    },
+    {
+      "node_id": "DF-006",
+      "action": "modify",
+      "reason": "冻结改变了可用额度语义，必须补冻结链路集成用例与冻结后并发扣减用例，并重跑全量回归。",
+      "files": [
+        "tests/test_integration.py",
+        "tests/test_concurrency.py"
+      ],
+      "requires_retest": true
+    },
+    {
+      "node_id": "DF-007",
+      "action": "modify",
+      "reason": "README 的“本期不做冻结”与 DEPLOY 的配置项已过时，必须同步，否则接手的人会按旧文档理解余额语义。",
+      "files": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "requires_retest": false
+    },
+    {
+      "node_id": "DF-008",
+      "action": "add",
+      "reason": "冻结/解冻是独立的写路径（不改变 balance，只改 frozen），单独成节点避免与 DF-004 的已验收代码混在一起返工。",
+      "files": [
+        "src/points/freeze.py",
+        "tests/test_freeze.py"
+      ],
+      "requires_retest": true
+    }
+  ],
+  "risk": {
+    "level": "medium",
+    "items": [
+      "对账公式从 sum(amount)=balance 变为两条：sum(amount)=balance、sum(frozen_delta)=frozen",
+      "历史流水没有 frozen_delta 字段，读取必须容错",
+      "DF-002 是已验收节点，返工需重新验收；DF-004/DF-005 不得重跑"
+    ]
+  },
+  "recommended_plan": "先改数据结构（DF-002）→ 再实现冻结服务（DF-008）→ 补集成与并发验证（DF-006）→ 最后更新文档（DF-007）。DF-003/DF-004/DF-005 保持已完成，不重跑。",
+  "confirmed_at": "2026-11-25T14:06:00+08:00",
+  "confirmed_by": "需求方（演示）"
+}

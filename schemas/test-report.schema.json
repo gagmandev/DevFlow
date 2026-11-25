@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "devflow/test-report.schema.json",
+  "title": "DevFlow 节点测试证据（test-report.json）",
+  "type": "object",
+  "required": ["node_id", "status", "executed_at", "commands", "summary"],
+  "properties": {
+    "node_id": { "type": "string", "pattern": "^DF-[0-9]{3,}$" },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "partial", "not_run"],
+      "description": "partial=部分通过仍有失败；not_run 不能用于验收通过"
+    },
+    "executed_at": { "type": "string" },
+    "executed_by": { "type": ["string", "null"] },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["cmd", "exit_code"],
+        "properties": {
+          "cmd": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "output_file": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "passed", "failed"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": ["object", "null"],
+      "properties": {
+        "tool": { "type": "string" },
+        "line": { "type": "number", "minimum": 0, "maximum": 1 },
+        "branch": { "type": ["number", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "result"],
+        "properties": {
+          "name": { "type": "string" },
+          "result": { "type": "string", "enum": ["pass", "fail", "skip"] },
+          "detail": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "not_run_reason": { "type": ["string", "null"] },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": false
+}

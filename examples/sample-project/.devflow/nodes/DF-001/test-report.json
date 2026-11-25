@@ -1,0 +1,29 @@
+{
+  "node_id": "DF-001",
+  "status": "passed",
+  "executed_at": "2026-11-25T13:41:33+08:00",
+  "executed_by": "code-agent（演示执行）",
+  "commands": [
+    {
+      "cmd": "python -m unittest discover -s tests -v",
+      "exit_code": 0,
+      "output_file": null
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": null,
+  "cases": [
+    { "name": "test_all_errors_share_base_class", "result": "pass", "detail": "四个子类都继承 PointsError" },
+    { "name": "test_codes_are_stable", "result": "pass", "detail": "错误码与约定一致" },
+    { "name": "test_message_kept_in_str", "result": "pass", "detail": "文案不被吞掉" },
+    { "name": "test_insufficient_balance_carries_numbers", "result": "pass", "detail": "required/available 可读" },
+    { "name": "test_catchable_as_points_error", "result": "pass", "detail": "可按基类捕获" }
+  ],
+  "not_run_reason": null,
+  "notes": "unittest 输出：Ran 5 tests in 0.000s / OK"
+}

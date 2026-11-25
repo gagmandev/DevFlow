@@ -1,0 +1,3 @@
+# DevFlow（计划与报告要提交，锁文件不提交）
+.devflow/.lock
+.devflow/**/*.tmp

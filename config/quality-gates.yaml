@@ -1,0 +1,30 @@
+# 质量门槛
+# enforce 决定不满足时是 error（阻止状态变更）还是 warning（只提示）。
+
+gates:
+  node_accept:
+    require_execution_report: true
+    require_test_report: true
+    require_tests_passed: true
+    require_commands_executed: true
+    require_acceptance_evidence: true
+    # 改了 files_scope 之外的文件：warning 只提示，error 阻止验收
+    out_of_scope: warning
+
+  coverage:
+    # 只有项目本身能统计覆盖率时才打开
+    enabled: false
+    target_line: 0.80
+    enforce: false
+
+  regression:
+    require_build: true
+    require_tests: true
+    forbid_open_blockers: true
+    forbid_missing_reports: true
+    forbid_failed_tests: true
+
+  release:
+    require_regression_report: true
+    # 交付报告必须区分"已验证/已实现未验证/未实现"
+    require_status_split: true

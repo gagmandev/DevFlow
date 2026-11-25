@@ -1,0 +1,71 @@
+# 任务拆解规则
+# 这里的值是"检查阈值"，由 validate.py 读取并执行；改完不需要改代码。
+
+phases:
+  - Foundation
+  - Shared
+  - Business
+  - Integration
+  - Release
+
+phase_aliases:
+  foundation: Foundation
+  shared: Shared
+  business: Business
+  integration: Integration
+  release: Release
+
+priority_order:
+  - P0
+  - P1
+  - P2
+  - P3
+
+# 阶段与优先级的对应只是默认建议，不是硬规则。
+# 只有真正阻塞后续所有任务的工作才配 P0。
+priority_hint:
+  Foundation: P1
+  Shared: P1
+  Business: P2
+  Integration: P1
+  Release: P1
+
+decomposition:
+  # 单个节点建议涉及的最大文件数，超过只给警告
+  max_files_per_node: 8
+  # 单版本计划节点数上限，超过说明拆得太细
+  max_nodes: 60
+  # 验收标准至少几条
+  min_acceptance_criteria: 1
+  # 禁止把无业务关联的功能塞进同一节点（由人工/模型判断，脚本只提示跨域节点）
+  warn_mixed_domains: true
+
+dependency:
+  forbid_cycles: true
+  # 并行组内成员之间不允许存在依赖
+  forbid_dependency_inside_group: true
+  # Foundation 阶段默认串行
+  foundation_serial: true
+
+parallel:
+  max_group_size: 3
+  # 同组节点 files_scope 重叠时给出警告
+  require_no_file_overlap: true
+
+prompt:
+  # 节点提示词必须出现的段落标题（缺失即报错）
+  required_sections:
+    - 角色
+    - 任务
+    - 项目背景
+    - 关联需求
+    - 前置依赖
+    - 必读文件
+    - 修改范围
+    - 实现步骤
+    - 技术约束
+    - 禁止事项
+    - 验收标准
+    - 测试要求
+    - 交付物
+    - 执行报告

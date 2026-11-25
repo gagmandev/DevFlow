@@ -1,0 +1,137 @@
+{
+  "schema_version": "1.0",
+  "requirement_version": 1,
+  "source_files": [
+    "requirements.md",
+    ".devflow/requirements/source/requirements-v0.9.md"
+  ],
+  "requirements": [
+    {
+      "req_id": "REQ-001",
+      "title": "开通积分账户",
+      "category": "functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "为指定 user_id 开通积分账户，初始余额 0；同一 user_id 重复开户幂等返回已有账户。",
+      "source": "requirements.md 三.1",
+      "acceptance": [
+        "重复开户不产生第二个账户且不报错",
+        "新账户 balance=0、frozen=0"
+      ],
+      "clarification_ids": [
+        "Q-101"
+      ]
+    },
+    {
+      "req_id": "REQ-002",
+      "title": "每日签到送积分",
+      "category": "functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "每个自然日首次签到发放 10 积分，当天重复签到不重复入账。",
+      "source": "requirements.md 三.2",
+      "acceptance": [
+        "当天首次签到余额 +10",
+        "当天第二次签到余额不变且不新增流水"
+      ],
+      "clarification_ids": [
+        "Q-103"
+      ]
+    },
+    {
+      "req_id": "REQ-003",
+      "title": "订单完成奖励积分",
+      "category": "business_rule",
+      "priority": "must",
+      "status": "active",
+      "statement": "订单完成后按实付金额发放积分，1 元 = 1 积分，向下取整；同一来源单号幂等。",
+      "source": "requirements.md 三.3 + Q-001",
+      "acceptance": [
+        "1999 分（19.99 元）奖励 19 分",
+        "同一订单号重复调用只入账一次"
+      ],
+      "clarification_ids": [
+        "Q-001"
+      ]
+    },
+    {
+      "req_id": "REQ-004",
+      "title": "兑换扣减积分",
+      "category": "functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "兑换商品时扣减积分；可用余额不足时拒绝，余额与流水均不变。",
+      "source": "requirements.md 三.4",
+      "acceptance": [
+        "余额不足抛 InsufficientBalance 且无副作用",
+        "允许扣减到 0，不允许扣成负数"
+      ],
+      "clarification_ids": [
+        "Q-003"
+      ]
+    },
+    {
+      "req_id": "REQ-005",
+      "title": "积分流水记录与查询",
+      "category": "functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "每笔变动记录类型、数量、来源单号、时间；支持按用户分页查询，默认 20 条、最大 100 条。",
+      "source": "requirements.md 三.5",
+      "acceptance": [
+        "每笔入账/扣减有且只有一条流水",
+        "分页 size 超过 100 时截断"
+      ],
+      "clarification_ids": [
+        "Q-102"
+      ]
+    },
+    {
+      "req_id": "REQ-006",
+      "title": "余额查询",
+      "category": "functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "返回 balance、frozen、available，available = balance - frozen。",
+      "source": "requirements.md 三.6",
+      "acceptance": [
+        "available = balance - frozen",
+        "不存在的用户抛 AccountNotFound"
+      ],
+      "clarification_ids": []
+    },
+    {
+      "req_id": "REQ-007",
+      "title": "运营查询全部流水",
+      "category": "permission",
+      "priority": "should",
+      "status": "active",
+      "statement": "运营可按 user_id 或时间区间查询全部用户流水。",
+      "source": "requirements.md 二",
+      "acceptance": [
+        "不传 user_id 时返回全部用户流水",
+        "时间区间按左闭右开过滤"
+      ],
+      "clarification_ids": [
+        "OPEN-003"
+      ]
+    },
+    {
+      "req_id": "REQ-008",
+      "title": "并发安全与数据原子性",
+      "category": "non_functional",
+      "priority": "must",
+      "status": "active",
+      "statement": "并发扣减不得超扣；写盘原子；积分全程整数运算。",
+      "source": "requirements.md 五 + Q-003",
+      "acceptance": [
+        "20 线程各扣 1 分、余额 10 分时恰好 10 次成功",
+        "落盘使用临时文件 + os.replace",
+        "积分计算不出现 float"
+      ],
+      "clarification_ids": [
+        "Q-003"
+      ]
+    }
+  ]
+}

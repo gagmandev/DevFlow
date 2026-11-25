@@ -1,0 +1,468 @@
+{
+  "schema_version": "1.0",
+  "project_id": "points-demo",
+  "plan_version": 2,
+  "requirement_version": 2,
+  "status": "active",
+  "created_at": "2026-11-25T13:46:43+08:00",
+  "approved_at": "2026-11-25T13:47:17+08:00",
+  "approved_by": "user",
+  "based_on": {
+    "plan_version": 1,
+    "change_id": "CR-001"
+  },
+  "stats_note": "",
+  "nodes": [
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "requirements.md"
+      ],
+      "outputs": [
+        "src/points/__init__.py",
+        "src/points/errors.py",
+        "tests/test_errors.py"
+      ],
+      "files_scope": [
+        "src/points/__init__.py",
+        "src/points/errors.py",
+        "tests/test_errors.py"
+      ],
+      "test_strategy": [
+        "断言四个异常都能被捕获且 code 正确"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": null,
+      "attempts": 0,
+      "started_at": null,
+      "completed_at": null,
+      "accepted_by": null,
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "v1 已完成；CR-001 判定 reusable，不返工",
+      "node_id": "DF-001",
+      "node_name": "项目骨架与领域异常",
+      "phase": "Foundation",
+      "type": "infrastructure",
+      "priority": "P0",
+      "description": "建立 src/points 包结构、测试入口和领域异常体系。",
+      "requirement_ids": [],
+      "dependencies": [],
+      "acceptance_criteria": [
+        "python -m unittest discover -s tests -v 可执行并通过",
+        "src/points/errors.py 定义四个异常，均带 code 属性",
+        "包可从 src 布局导入"
+      ],
+      "prompt_file": ".devflow/nodes/DF-001/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/models.py",
+        "src/points/store.py",
+        "tests/test_store.py"
+      ],
+      "outputs": [
+        "src/points/models.py",
+        "tests/test_store.py"
+      ],
+      "files_scope": [
+        "src/points/models.py",
+        "tests/test_store.py"
+      ],
+      "test_strategy": [
+        "frozen_delta 往返序列化",
+        "amount=0 + frozen_delta=5 允许；amount=0 + frozen_delta=0 拒绝",
+        "读取缺 frozen_delta 的旧流水默认 0",
+        "Account frozen 非 0 时 available 正确",
+        "原有 15 条测试仍全绿"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:47:22+08:00",
+      "completed_at": "2026-11-25T13:48:17+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "CR-001 触发返工：数据结构变更。v1 的完成状态保留在 backlog-v1.json",
+      "node_id": "DF-002",
+      "node_name": "账户与流水数据结构 + 原子存储",
+      "phase": "Foundation",
+      "type": "infrastructure",
+      "priority": "P0",
+      "description": "在 v1 基础上为 LedgerEntry 增加 frozen_delta，支持冻结流水（amount=0 且 frozen_delta≠0），并兼容历史数据。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-008",
+        "REQ-009"
+      ],
+      "dependencies": [
+        "DF-001"
+      ],
+      "acceptance_criteria": [
+        "LedgerEntry 新增 frozen_delta 字段，默认 0，to_dict/from_dict 完整往返",
+        "amount=0 仅在 frozen_delta≠0 时允许；两者同时为 0 抛 ValueError",
+        "from_dict 能读取没有 frozen_delta 的 v1 历史流水（默认 0）",
+        "Account.frozen 允许非 0，available = balance - frozen",
+        "原子写与坏文件处理保持不变"
+      ],
+      "prompt_file": ".devflow/nodes/DF-002/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/models.py",
+        "src/points/store.py"
+      ],
+      "outputs": [
+        "src/points/repository.py",
+        "tests/test_repository.py"
+      ],
+      "files_scope": [
+        "src/points/repository.py",
+        "tests/test_repository.py"
+      ],
+      "test_strategy": [
+        "分页边界",
+        "时间区间",
+        "exists 命中/未命中"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": null,
+      "attempts": 0,
+      "started_at": null,
+      "completed_at": null,
+      "accepted_by": null,
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "v1 已完成；接口未变，reusable",
+      "node_id": "DF-003",
+      "node_name": "账户与流水仓储层",
+      "phase": "Shared",
+      "type": "shared",
+      "priority": "P1",
+      "description": "在存储之上提供 AccountRepo / LedgerRepo。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-008"
+      ],
+      "dependencies": [
+        "DF-002"
+      ],
+      "acceptance_criteria": [
+        "AccountRepo.get_or_create 对同一 user_id 幂等",
+        "AccountRepo.save 更新 version 并原子落盘",
+        "LedgerRepo.exists 能判断重复来源",
+        "LedgerRepo.query 支持过滤与分页，size 上限 100"
+      ],
+      "prompt_file": ".devflow/nodes/DF-003/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": true,
+      "parallel_group": "A",
+      "inputs": [
+        "src/points/repository.py",
+        "src/points/models.py"
+      ],
+      "outputs": [
+        "src/points/service.py",
+        "tests/test_service.py"
+      ],
+      "files_scope": [
+        "src/points/service.py",
+        "tests/test_service.py"
+      ],
+      "test_strategy": [
+        "开户/签到/奖励/扣减/余额"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": null,
+      "attempts": 0,
+      "started_at": null,
+      "completed_at": null,
+      "accepted_by": null,
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "v1 已完成；redeem 已用 available，冻结后自动生效，reusable",
+      "node_id": "DF-004",
+      "node_name": "账户服务：开户 / 签到 / 奖励 / 扣减 / 余额",
+      "phase": "Business",
+      "type": "business",
+      "priority": "P1",
+      "description": "实现 WalletService 的核心写路径。",
+      "requirement_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-006"
+      ],
+      "dependencies": [
+        "DF-003"
+      ],
+      "acceptance_criteria": [
+        "重复开户幂等",
+        "签到按自然日幂等",
+        "订单奖励向下取整且按单号幂等",
+        "兑换按 available 校验，不足无副作用",
+        "balance 返回三值"
+      ],
+      "prompt_file": ".devflow/nodes/DF-004/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": true,
+      "parallel_group": "A",
+      "inputs": [
+        "src/points/repository.py"
+      ],
+      "outputs": [
+        "src/points/queries.py",
+        "tests/test_queries.py"
+      ],
+      "files_scope": [
+        "src/points/queries.py",
+        "tests/test_queries.py"
+      ],
+      "test_strategy": [
+        "倒序",
+        "跨用户",
+        "时间边界",
+        "分页越界"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": null,
+      "attempts": 0,
+      "started_at": null,
+      "completed_at": null,
+      "accepted_by": null,
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "v1 已完成；CR-001 评审结论：查询层不感知流水类型，reusable",
+      "node_id": "DF-005",
+      "node_name": "流水查询与运营视图",
+      "phase": "Business",
+      "type": "business",
+      "priority": "P2",
+      "description": "实现 LedgerQuery：用户视图与运营视图。",
+      "requirement_ids": [
+        "REQ-005",
+        "REQ-007"
+      ],
+      "dependencies": [
+        "DF-003"
+      ],
+      "acceptance_criteria": [
+        "按用户查询按时间倒序",
+        "不传 user_id 返回全部",
+        "时间区间左闭右开",
+        "分页 size 超 100 截断"
+      ],
+      "prompt_file": ".devflow/nodes/DF-005/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/service.py",
+        "src/points/freeze.py",
+        "src/points/queries.py"
+      ],
+      "outputs": [
+        "tests/test_integration.py",
+        "tests/test_concurrency.py"
+      ],
+      "files_scope": [
+        "tests/test_integration.py",
+        "tests/test_concurrency.py"
+      ],
+      "test_strategy": [
+        "冻结→兑换失败→解冻→兑换成功",
+        "两条对账公式",
+        "并发冻结不超冻",
+        "原有并发扣减用例仍通过"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:48:53+08:00",
+      "completed_at": "2026-11-25T13:49:30+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "CR-001 触发返工：新增依赖 DF-008",
+      "node_id": "DF-006",
+      "node_name": "端到端链路与并发验证",
+      "phase": "Integration",
+      "type": "integration",
+      "priority": "P1",
+      "description": "在 v1 基础上补冻结链路集成用例、冻结后并发扣减用例，并重跑全量回归。",
+      "requirement_ids": [
+        "REQ-008",
+        "REQ-009"
+      ],
+      "dependencies": [
+        "DF-004",
+        "DF-005",
+        "DF-008"
+      ],
+      "acceptance_criteria": [
+        "端到端链路含冻结/解冻，余额、冻结额与两条对账公式一致",
+        "冻结后可用额度不足时兑换被拒绝",
+        "20 线程各冻结 1 分、可用 10 分 → 恰好 10 次成功，frozen 不超过 balance",
+        "全量测试全绿"
+      ],
+      "prompt_file": ".devflow/nodes/DF-006/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "outputs": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "files_scope": [
+        "README.md",
+        "docs/DEPLOY.md"
+      ],
+      "test_strategy": [],
+      "no_test": true,
+      "no_test_reason": "纯文档节点；文档中的命令由 DF-006 的全量回归实际执行验证",
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:49:31+08:00",
+      "completed_at": "2026-11-25T13:50:22+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "CR-001 触发返工：文档已过时",
+      "node_id": "DF-007",
+      "node_name": "交付文档与运行说明",
+      "phase": "Release",
+      "type": "release",
+      "priority": "P2",
+      "description": "更新 README 与部署文档，补充冻结能力、两条对账公式与新的已知限制。",
+      "requirement_ids": [],
+      "dependencies": [
+        "DF-006"
+      ],
+      "acceptance_criteria": [
+        "README 的「本期不做」不再包含冻结，并说明冻结语义",
+        "部署文档说明 frozen 字段与对账方式",
+        "文档里的命令仍可执行"
+      ],
+      "prompt_file": ".devflow/nodes/DF-007/prompt.md",
+      "created_in_plan": 2
+    },
+    {
+      "parallelizable": false,
+      "parallel_group": null,
+      "inputs": [
+        "src/points/models.py",
+        "src/points/repository.py",
+        "src/points/service.py"
+      ],
+      "outputs": [
+        "src/points/freeze.py",
+        "tests/test_freeze.py"
+      ],
+      "files_scope": [
+        "src/points/freeze.py",
+        "tests/test_freeze.py"
+      ],
+      "test_strategy": [
+        "冻结后三值关系",
+        "可用不足无副作用",
+        "部分解冻与全额解冻",
+        "解冻超额拒绝",
+        "冻结单号幂等",
+        "frozen_delta 对账"
+      ],
+      "no_test": false,
+      "no_test_reason": null,
+      "status": "completed",
+      "context_file": null,
+      "execution_report": null,
+      "test_report": null,
+      "owner": "code-agent",
+      "attempts": 1,
+      "started_at": "2026-11-25T13:48:17+08:00",
+      "completed_at": "2026-11-25T13:48:53+08:00",
+      "accepted_by": "user",
+      "superseded_by": null,
+      "blocked_reason": null,
+      "remark": "",
+      "node_id": "DF-008",
+      "node_name": "积分冻结 / 解冻服务",
+      "phase": "Business",
+      "type": "business",
+      "priority": "P1",
+      "description": "新增 FreezeService：按金额冻结可用积分、部分解冻、查询冻结额，冻结与解冻各写一条 frozen_delta 流水。",
+      "requirement_ids": [
+        "REQ-009",
+        "REQ-008"
+      ],
+      "dependencies": [
+        "DF-002",
+        "DF-003"
+      ],
+      "acceptance_criteria": [
+        "freeze：balance 不变、frozen 增加、available 减少",
+        "freeze 可用不足抛 InsufficientBalance，无副作用",
+        "unfreeze 支持部分解冻；超过 frozen 抛 InvalidArgument",
+        "同一 source_id 重复冻结/解冻抛 DuplicateRequest",
+        "冻结/解冻流水 amount=0、frozen_delta=±amount",
+        "sum(frozen_delta) == frozen"
+      ],
+      "prompt_file": ".devflow/nodes/DF-008/prompt.md",
+      "created_in_plan": 2
+    }
+  ]
+}
