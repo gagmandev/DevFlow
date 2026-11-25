@@ -1,5 +1,14 @@
 # 质量门槛
-# enforce 决定不满足时是 error（阻止状态变更）还是 warning（只提示）。
+#
+# 两层结构：
+#   gates:    基线（development 默认值，兼容旧项目）
+#   profiles: 按项目 quality_profile 覆盖基线
+#
+# 项目用 `project.json` 的 `quality_profile` 选择（init 时会明确写入）。
+# 旧项目没有该字段时按 development 处理，`doctor` 会提示升级。
+#
+# 解析统一走 `validate.load_config(skill_dir, root)` / `df.load_config(root)`，
+# 不要在别处自己拼 gates，否则 import / release / release-ready 会对同一份报告给出不同结论。
 
 gates:
   node_accept:
@@ -8,16 +17,21 @@ gates:
     require_tests_passed: true
     require_commands_executed: true
     require_acceptance_evidence: true
+    # 覆盖到的每条需求，其每条验收标准都要有独立证据（requirement_acceptance）
+    require_requirement_evidence: true
+    # 新执行尝试必须有完整用例明细（cases 与 summary 对得上）
+    require_case_details: true
     # 有跳过用例就不能验收（跳过的测试等于没测）
     require_no_skipped: true
     # 改了 files_scope 之外的文件：error 阻止验收，warning 只提示
     out_of_scope: error
 
-  # files_scope 为空时的策略：
-  #   deny  严格模式，没有范围定义就拒绝验收
-  #   warn  提示但放行（兼容旧计划）
-  #   allow 视为不限制
-  empty_scope: warn
+  # files_scope 为空时的策略（三选一，语义必须唯一）：
+  #   deny          没有范围定义就拒绝验收
+  #   outputs_only  只允许改动 outputs 里明确列出、且开工前不存在的文件
+  #   allow         视为不限制（不推荐）
+  # 注意：没有 warn —— "提示但放行"会与 accept 的拦截互相矛盾。
+  empty_scope: outputs_only
 
   coverage:
     # 只有项目本身能统计覆盖率时才打开
@@ -33,7 +47,7 @@ gates:
     forbid_failed_tests: true
     # 需求没有被任何节点覆盖时直接判失败（不是警告）
     block_uncovered_requirements: true
-    # 这些检查项必须存在且状态为 passed；不适用的项要标 skipped 并写原因
+    # 必需检查项的唯一权威来源：报告只能遵守，不能自己降级
     required_checks:
       - build
       - unit_test
@@ -41,14 +55,87 @@ gates:
       - core_flow
       - consistency
       - requirement_acceptance
+    # 回归报告必须绑定执行时的源代码快照
+    require_source_snapshot: true
+    # 额外的可选检查项失败是否也阻断（默认只记录，不影响整体结论）
+    block_optional_failures: false
 
   git:
     # off    不检查
     # warn   记录差异并提示，验收前人工看
     # error  有差异就阻止验收（需要 --ack-changes 记录豁免）
     verify_changes: warn
+    # git 不可用时是否阻断验收（production 打开）
+    required: false
 
   release:
     require_regression_report: true
+    # 交付报告必须真的生成且内容完整，才能 release_ready
+    require_release_report: true
+    # 不允许从 regression 直接跳到 release_ready（旧项目用 migrate 显式开兼容）
+    require_release_candidate: true
     # 交付报告必须区分"已验证/已实现未验证/未实现"
     require_status_split: true
+
+  context:
+    # 契约声明（api_contracts / db_objects）必须有 contract_bindings 文件绑定
+    require_contract_bindings: false
+
+# 占位内容检测：交付报告里出现这些词说明还没写完
+placeholders:
+  - 待补充
+  - 待填写
+  - TODO
+  - TBD
+  - 示例占位
+  - XXX
+  - （待补充）
+
+release_report:
+  # 交付报告必须包含的章节（用二级标题匹配）
+  required_sections:
+    - 项目概述
+    - 需求完成情况
+    - 任务完成情况
+    - 验证状态
+    - 构建与测试
+    - 部署说明
+    - 配置项
+    - 已知问题
+    - 最终验收
+  # "不适用"必须带原因，不能只写两个字
+  not_applicable_pattern: "不适用"
+
+profiles:
+  development:
+    gates: {}
+
+  production:
+    gates:
+      node_accept:
+        require_execution_report: true
+        require_test_report: true
+        require_tests_passed: true
+        require_commands_executed: true
+        require_acceptance_evidence: true
+        require_requirement_evidence: true
+        require_case_details: true
+        require_no_skipped: true
+        out_of_scope: error
+      empty_scope: outputs_only
+      regression:
+        forbid_open_blockers: true
+        forbid_missing_reports: true
+        forbid_failed_tests: true
+        block_uncovered_requirements: true
+        require_source_snapshot: true
+      git:
+        verify_changes: error
+        required: true
+      release:
+        require_regression_report: true
+        require_release_report: true
+        require_release_candidate: true
+        require_status_split: true
+      context:
+        require_contract_bindings: true

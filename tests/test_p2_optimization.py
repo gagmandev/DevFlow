@@ -113,6 +113,11 @@ class SelfTestCommandTest(unittest.TestCase):
         payload = json.loads(out[out.index("{"):])
         self.assertEqual(payload["status"], "passed", out)
         self.assertEqual(payload["layers"], {})
+        # 端到端必须覆盖并行执行与外部报告两条支线
+        names = {step["step"] for step in payload["steps"]}
+        self.assertIn("parallel:verify", names)
+        self.assertIn("external:sync", names)
+        self.assertIn("external:reject-scope", names)
         steps = {s["step"]: s for s in payload["steps"]}
         for name in (
             "init", "req-import", "req-confirm", "plan-import", "validate",
@@ -129,6 +134,23 @@ class SelfTestCommandTest(unittest.TestCase):
         code, out = quiet(df.main, ["self-test", "--fast"])
         self.assertEqual(code, 0, out)
         self.assertEqual(set(SKILL_DIR.glob(".devflow*")), before)
+
+
+class CiWorkflowTest(unittest.TestCase):
+    """P2-03：仓库必须有可用的 GitHub Actions 配置。"""
+
+    def test_ci_covers_both_os_and_core_commands(self):
+        path = SKILL_DIR / ".github" / "workflows" / "ci.yml"
+        self.assertTrue(path.exists(), "缺少 .github/workflows/ci.yml")
+        text = path.read_text(encoding="utf-8")
+        for token in (
+            "ubuntu-latest", "windows-latest",
+            "python -m unittest discover -s tests",
+            "examples/sample-project",
+            "self-test",
+        ):
+            self.assertIn(token, text)
+        self.assertIn("pull_request", text)
 
 
 if __name__ == "__main__":

@@ -39,10 +39,15 @@
       "description": "人工确认的并行例外；没有记录就不能把冲突节点放进同一并行组",
       "items": {
         "type": "object",
-        "required": ["group", "reason", "approved_by"],
+        "required": ["group", "nodes", "reason", "approved_by"],
         "properties": {
           "group": { "type": "string" },
-          "nodes": { "type": "array", "items": { "type": "string" } },
+          "nodes": {
+            "type": "array",
+            "minItems": 2,
+            "items": { "type": "string" },
+            "description": "必须点名冲突的节点组合，不允许整组豁免"
+          },
           "reason": { "type": "string", "minLength": 1 },
           "approved_by": { "type": "string", "minLength": 1 },
           "at": { "type": ["string", "null"] }

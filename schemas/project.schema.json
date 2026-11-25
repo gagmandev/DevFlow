@@ -18,6 +18,15 @@
     "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
     "project_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
     "project_name": { "type": "string", "minLength": 1 },
+    "quality_profile": {
+      "type": "string",
+      "enum": ["development", "production"],
+      "description": "质量门槛档位；production 会打开 Git 核对、源码快照、交付报告强制校验"
+    },
+    "legacy_release_shortcut": {
+      "type": "boolean",
+      "description": "旧项目兼容：允许从 regression 直接 release_ready（只能由 migrate 写入）"
+    },
     "project_type": {
       "type": "string",
       "enum": ["greenfield", "existing", "refactor"],

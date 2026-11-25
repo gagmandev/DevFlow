@@ -102,6 +102,9 @@ pending → ready → in_progress → needs_review → completed
 | 并行组靠"同层"猜 | `dfcore.parallel_issues` 统一判定依赖可达性与资源冲突 |
 | 上游产物改了、下游照旧开工 | `accept` 记交付物指纹，`start` 比对声明的 `inputs` |
 | 文档和代码漂移 | `tests/test_docs_consistency.py` + `df.py self-test` |
+| 回归后代码又改了 | `regression-check` 记录源码快照，导入/交付时复核 |
+| 交付报告没写完就交付 | `release-report.json` 元信息 + 章节/占位符校验 |
+| 门禁一套用到底 | `quality_profile`：development / production 两档 |
 
 ## 八、扩展点
 

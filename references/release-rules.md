@@ -55,7 +55,8 @@ Markdown 是给人看的，不能作为交付依据——"报告存在"和"测�
 `config/quality-gates.yaml` 的 `required_checks` 列出必须存在的检查项；
 缺项等于"没检查"，拒绝导入。不适用的项要显式 `skipped` + 原因，不能直接省略。
 
-`release` 读 JSON 并重新校验，不看 Markdown 的措辞。旧项目只有 Markdown 时，
+`release` 读 JSON 并重新校验，不看 Markdown 的措辞；回归报告还必须绑定
+`source_snapshot`，代码在回归之后发生变化就不再作数。旧项目只有 Markdown 时，
 `release --legacy-regression` 是明确的降级开关，会在项目档案里留痕。
 
 ## 三、问题定位
@@ -111,6 +112,21 @@ in_progress ──(全部节点完成)──> regression
 **`accepted` 是终态。** 到达之后 `start` / `sync` / `accept` / `retry` / `regression-check` /
 `release` / `release-ready` 全部拒绝执行（退出码 2），`regression-check` 也不能把状态改回
 `regression`。要继续开发只能走变更：`change-new` → `change-apply`（新计划 + 状态回 `in_progress`）。
+
+## 三·五、交付报告必须真的写完
+
+`release-ready` 只接受 `release_candidate`，并逐项检查 `.devflow/releases/release-report.md`：
+
+| 检查 | 说明 |
+| --- | --- |
+| 版本 | `releases/release-report.json` 的 `plan_version` / `requirement_version` 与当前一致 |
+| 章节 | 项目概述、需求、任务、验证状态、构建与测试、部署、配置项、已知问题、最终验收 |
+| 占位 | 待补充 / TODO / TBD / 待填写 / 示例占位 —— 出现即拒绝 |
+| 空章节 | 正文为空即拒绝 |
+| 不适用 | 必须写清原因，不能只写"不适用"三个字，也不能删章节 |
+
+交付报告不是"再写一遍 README"：部署说明要能照着做，配置项要能照着填，
+已知问题要来自节点执行报告的 `leftovers` 或回归结论。
 
 ## 四、交付报告的诚实原则
 

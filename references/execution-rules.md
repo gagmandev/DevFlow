@@ -22,6 +22,19 @@
 原则：只对**声明过的依赖**做判断。没写 `inputs` 的节点不做推断，
 仓库里别处改个文档不应该让全部下游返工。
 
+还有第六项：**契约文件绑定**。节点声明了 `api_contracts` / `db_objects` 时，
+应该用 `contract_bindings` 指向具体文件（OpenAPI、SQL、共享常量）：
+
+```json
+"contract_bindings": [
+  {"kind": "api_contract", "id": "PointsAccountApi", "files": ["docs/api/points-account.yaml"]},
+  {"kind": "db_object", "id": "PointsAccount", "files": ["database/schema/points-account.sql"]}
+]
+```
+
+`accept` 会记录这些文件的指纹；下游 `start` 时比对。契约变了，下游必须先评估影响——
+工具不解析接口语义，但能保证"文件变了不会被静默忽略"。
+
 任何一项不满足，都要**停下来报告**，不要"先写着，反正差不多"。
 
 ## 二、上下文怎么读

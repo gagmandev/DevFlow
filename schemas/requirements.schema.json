@@ -45,7 +45,24 @@
           "confirmed_at": { "type": ["string", "null"] },
           "statement": { "type": "string" },
           "source": { "type": "string", "description": "来源：文件名+章节/页码/图号" },
-          "acceptance": { "type": "array", "items": { "type": "string" } },
+          "acceptance": {
+            "type": "array",
+            "description": "验收标准。字符串为旧格式；对象可带稳定 id，便于与执行证据逐条对应",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "required": ["criterion"],
+                  "properties": {
+                    "id": { "type": "string", "pattern": "^AC-[0-9A-Za-z._-]+$" },
+                    "criterion": { "type": "string", "minLength": 1 }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
           "clarification_ids": { "type": "array", "items": { "type": "string" } },
           "superseded_by": { "type": ["string", "null"] },
           "note": { "type": "string" }

@@ -43,6 +43,28 @@
 - 数据边界（分页越界、超大请求）
 - 契约（字段名、类型、可空性）
 
+## 二·五、用例明细与需求验收
+
+新执行（有 `attempt_id`）必须提供 `cases` 明细：
+
+- 条数等于 `summary.total`
+- pass/fail/skip 数量与 `summary` 完全一致
+- 一条 `fail` 就不能 `passed`
+- 真的没有自动化测试 → 走 `no_test` + 理由，不要用空 `cases` 糊过去
+
+需求验收要**逐条**对应，写在执行报告的 `requirement_acceptance`：
+
+```json
+"requirement_acceptance": [
+  {"req_id": "REQ-001", "criterion": "退款成功后积分必须冻结", "met": true,
+   "evidence": "test_refund_freezes_points"}
+]
+```
+
+- 每条 active 需求的每条验收标准都要有一项
+- 不能用别的 REQ 的证据，也不能"启动成功"代替业务验收
+- 需求验收标准建议写成 `{id, criterion}`，文本改了也能对上
+
 ## 三、证据标准
 
 验收看的是证据，不是描述。

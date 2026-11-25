@@ -338,6 +338,30 @@ class ScopeTest(unittest.TestCase):
             n = node(files_scope=["src"])
             self.assertTrue(core.scope_violations(n, ["src/link.py"], root))
 
+    def test_symlink_prefix_sibling_escape(self):
+        """外部目录名带项目根前缀（proj vs proj-evil）也必须算逃逸。"""
+        import shutil
+
+        base = Path(tempfile.mkdtemp())
+        try:
+            root = base / "devflow-project"
+            root.mkdir()
+            (root / "src").mkdir()
+            evil = base / "devflow-project-evil"
+            evil.mkdir()
+            (evil / "secret.py").write_text("x", encoding="utf-8")
+            link = root / "src" / "link.py"
+            try:
+                os.symlink(evil / "secret.py", link)
+            except (OSError, NotImplementedError):
+                self.skipTest("当前环境不支持创建符号链接")
+            n = node(files_scope=["src"])
+            problems = core.scope_violations(n, ["src/link.py"], root)
+            self.assertTrue(problems, "同名前缀目录必须被识别为逃逸")
+            self.assertIn("逃逸", " ".join(problems))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
     def test_cli_blocks_accept_until_waived(self):
         p = Project()
         try:
@@ -409,6 +433,42 @@ class LockTest(unittest.TestCase):
         self.assertEqual(data["pid"], os.getpid())
         lock.release()
 
+    def test_threads_must_compete(self):
+        """同一进程的两个线程不能共享可重入深度：后者必须去争 OS 锁。"""
+        import threading
+        import time
+
+        path = Path(self.tmp) / ".lock"
+        holding = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        def holder():
+            with core.project_lock(Path(self.tmp), timeout=5):
+                holding.set()
+                release.wait(5)
+
+        def contender():
+            holding.wait(5)
+            start = time.time()
+            try:
+                with core.project_lock(Path(self.tmp), timeout=0.3):
+                    outcome["got"] = True
+            except core.LockTimeout:
+                outcome["got"] = False
+            outcome["waited"] = time.time() - start
+
+        t1 = threading.Thread(target=holder)
+        t2 = threading.Thread(target=contender)
+        t1.start()
+        t2.start()
+        t2.join(10)
+        release.set()
+        t1.join(10)
+
+        self.assertFalse(outcome.get("got"), "第二个线程不应拿到锁")
+        self.assertGreater(outcome.get("waited", 0), 0.1, "第二个线程应该真的等待过")
+
     def test_concurrent_start_no_lost_update(self):
         """多个进程同时 start 不同节点，不能互相覆盖。"""
         p = Project()
@@ -454,7 +514,11 @@ class TransactionTest(unittest.TestCase):
         p.run("sync", "DF-001")
         p.run("accept", "DF-001")
 
-        p.import_plan([node("DF-001", status="completed"), node("DF-002", dependencies=["DF-001"])], version=2)
+        p.import_plan(
+            [node("DF-001", status="completed"), node("DF-002", dependencies=["DF-001"])],
+            version=2,
+            based_on={"change_id": "CR-001", "plan_version": 1},
+        )
         p.run("prompt-init", "--all", "--plan", "2")
         code, out = p.run("change-new", "--title", "加一个节点", "--type", "add")
         self.assertEqual(code, 0, out)
@@ -554,6 +618,7 @@ class ReleaseStateTest(unittest.TestCase):
         p.write_evidence()
         p.run("sync", "DF-001")
         p.run("accept", "DF-001")
+        p.run("regression-check")   # 生成源码快照，后续导入要绑定它
         return p
 
     def _write_regression(self, p, conclusion="passed"):
@@ -580,7 +645,8 @@ class ReleaseStateTest(unittest.TestCase):
             "executed_by": "tester",
             "checks": checks,
         }
-        path = p.root / "regression.json"
+        # 报告放项目外：写在项目里会改变源码快照，导致导入被判为"代码已变化"
+        path = Path(tempfile.mkdtemp()) / "regression.json"
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return p.run("regression-import", "--file", str(path))
 

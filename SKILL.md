@@ -75,8 +75,20 @@ $DF status        # 不在 DevFlow 项目内会明确报错
 | 做变更影响分析 | `references/change-management.md` |
 | 回归、交付报告、验收 | `references/release-rules.md` |
 
-**机器能查的规则不要靠读文档记**：状态迁移、证据校验、范围比较、并行冲突、版本绑定，
-全部由 `df.py` / `validate.py` 强制执行。文档写错了以代码为准，并且要修文档。
+**机器能查的规则不要靠读文档记**：状态迁移、证据校验、范围比较、并行冲突、版本绑定、
+交付报告完整性、源码快照，全部由 `df.py` / `validate.py` 强制执行。文档写错了以代码为准，并且要修文档。
+
+### 质量档位
+
+`project.json` 的 `quality_profile` 决定门槛松紧：
+
+| 档位 | 适用 | 关键差异 |
+| --- | --- | --- |
+| `development` | 内部迭代、试验项目 | Git 差异只提示；不要求契约文件绑定 |
+| `production` | 真实交付 | Git 必须可核对、差异即阻断；要求契约绑定、源码快照、完整交付报告 |
+
+新项目用 `init --profile production`；老项目用 `migrate --profile production`。
+**不要给生产项目留 development 档位然后又抱怨"门禁太松"**——档位是声明，不是建议。
 
 ## 3. init · 初始化
 
@@ -297,6 +309,10 @@ $DF accept DF-003      # 证据齐全才 completed，并自动解锁下游
 
 - 执行报告存在，且有 `devflow-execution` JSON 块；`result` 必须是 `success`
 - `acceptance` **逐条覆盖**节点的验收标准，每条 `met=true` 且 `evidence` 非空
+- `requirement_acceptance` **逐条覆盖本节点涉及需求的验收标准**（不能借别的需求的证据，
+  也不能一条需求只证一条标准）；需求验收标准可以是字符串，也可以是 `{id, criterion}`
+- `modified_files` 必须存在（没有改动写 `[]`）；它会和 Git 实际变更**合并**后再过 `files_scope`
+
 - `test-report.json` 存在、`node_id` 对得上、`status=passed`
 - `commands` 非空，**每条**命令都有整数退出码，且**任何一条非 0 就失败**
 - `summary` 自洽：`total = passed + failed + skipped`，`failed=0`，`total>0`
@@ -308,7 +324,15 @@ $DF accept DF-003      # 证据齐全才 completed，并自动解锁下游
 
 ### 越界修改
 
-`files_scope` 之外的文件改动不会被"警告放过"：
+`files_scope` 之外的文件改动不会被"警告放过"。注意范围校验的输入是
+**报告声明 ∪ Git 实际变更**——Agent 漏报的越界文件同样会被拦下：
+
+```text
+modified_files(报告) + git 实际改动 → 合并去重 → files_scope 校验
+```
+
+`--ack-changes` 只确认"差异可以接受"，**不能**代替 `--allow-scope` 放行越界文件。
+
 
 1. `sync` 把越界项写进节点的 `scope_violations`，状态停在 `needs_review`，退出码 1
 2. `accept` 直接拒绝
@@ -431,7 +455,13 @@ $DF self-test --keep       # 保留临时目录，方便进去看
 $DF self-test --json --out /tmp/self-test.json   # 机器可读结果
 ```
 
-它在临时目录从 `init` 一路走到 `release-accept`（28 步），不读写任何真实项目。
+它在临时目录从 `init` 一路走到 `release-accept`，再跑两条支线：
+
+- **主链路**：需求 → 计划 → 执行 → 验收 → 变更 → 回归 → 交付（约 28 步）
+- **并行**：两个无依赖节点同组，两个进程同时 `start`，验证不丢状态、attempt 独立
+- **外部报告**：`sync --external` 正常导入，以及 attempt 错误、缺测试报告、缺证据块、越界、测试失败五类拒绝
+
+总共 60 步，不读写任何真实项目。
 输出会分开报告三层：单元测试、集成测试（示例项目）、端到端工作流。
 任何一层失败都退出码 1——**不要用降低门槛的方式让它变绿**。
 
@@ -452,6 +482,10 @@ $DF regression-check      # 前置检查，有阻塞会退出码 1
 - 需求被改成 `changed`，但没有 `superseded_by`，或替代需求不存在 / 不是 active
 
 把需求改成非 active 不是逃生门——必须写清原因和谁确认的，`changed` 必须指向真正的替代需求。
+
+前置检查还会记录**源代码快照**（`.devflow/regression/source-snapshot.json`）：
+Git 项目用 `HEAD + 未提交改动的内容指纹`，非 Git 项目用文件树哈希。
+之后的导入、`release-ready`、`release-accept` 都会复核——**回归跑完又改代码，旧报告直接作废**。
 
 然后**真的去跑**：
 
@@ -474,6 +508,8 @@ $DF regression-import --file regression.json
 它做三件事：Schema 校验、语义校验（状态与检查项必须自洽）、由 JSON 渲染 Markdown。
 `final-report.json` 是事实来源，`final-report.md` 只是展示。
 
+- 必需项由 `config/quality-gates.yaml` 的 `required_checks` 唯一决定；报告把必需项标成
+  `required=false`、少写、重复、或者自创"必需项"，都会被拒绝
 - 任一必需项 `failed` → 整体必须 `failed`
 - 必需项 `not_run` / `skipped` → 整体不能是 `passed`
 - `passed` 的项必须有命令、退出码 0、证据
@@ -507,7 +543,16 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 
 ### 2) release-ready
 
-再查一遍门槛（状态可能在这期间变化），全部通过才置 `release_ready`。
+只接受 `release_candidate`——**没有交付报告就不能进入待验收**。
+它会重新查一遍门槛（状态可能在这期间变化），并校验交付报告本身：
+
+- `.devflow/releases/release-report.md` 存在，且对应**当前**计划/需求版本
+- 章节齐全（项目概述、需求、任务、验证状态、构建与测试、部署、配置项、已知问题、最终验收）
+- 没有占位内容（待补充 / TODO / TBD / 待填写 / 示例占位）
+- 写"不适用"必须说明原因，不能靠删章节绕过
+
+旧项目确实没有报告时，只能走 `df.py migrate --legacy-release` 打开的兼容路径（会在档案里留痕）。
+
 这是"可以交给用户验收"的状态，不是"已验收"。
 
 ### 3) release-accept
@@ -538,6 +583,9 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 13. 生成交付报告 ≠ 交付；`accepted` 只能由用户明确验收产生。
 14. `accepted` 是终态：继续开发只能走变更流程，不能重跑命令把状态改回去。
 15. 不改 `scripts/` 之前先读代码；改完必须跑 `df.py self-test`，不许靠降门槛让它变绿。
+16. 不把必需检查项标成 optional，不给必需项编造 ID——必需集合只认质量配置。
+17. 回归之后改了代码，就不要拿旧报告交付；重新跑回归再导入。
+18. 交付报告是给人验收的，不写占位内容；不适用要写清原因。
 
 ## 16. 文件索引
 

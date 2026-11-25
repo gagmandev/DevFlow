@@ -132,7 +132,18 @@ $DF migrate      # 升级旧版 project.json（released → accepted）
 事务日志在 `.devflow/.txn/<id>/`，快照也在里面。回滚是确定安全的：
 只有全部写完才会标记 `committed`。
 
-## 七·六、自检（改引擎之后必跑）
+## 七·六、质量档位
+
+```bash
+$DF init --name "项目" --profile production   # 新项目直接上生产门禁
+$DF migrate --profile production              # 旧项目升级（不会删历史）
+$DF project-set --profile production          # 只切档位
+```
+
+`production` 会打开：Git 变更必须可核对、契约文件绑定、源码快照、完整交付报告。
+旧项目如果暂时补不出交付报告，只能 `migrate --legacy-release` 开兼容，会在项目档案里留痕。
+
+## 七·七、自检（改引擎之后必跑）
 
 ```bash
 $DF self-test            # 端到端 + 单元 + 示例项目集成
@@ -140,7 +151,8 @@ $DF self-test --fast     # 只跑端到端
 $DF self-test --json --out self-test.json
 ```
 
-在系统临时目录从空项目一路跑到 `accepted`（28 步），不碰任何真实项目。
+在系统临时目录从空项目一路跑到 `accepted`，再跑并行与外部报告两条支线（共 60 步），
+不碰任何真实项目。
 输出分三层：单元测试、集成测试（示例项目）、端到端工作流；任何一层失败都退出码 1。
 
 ## 八、常见问题

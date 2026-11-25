@@ -72,7 +72,14 @@ class RegressionCoverageTest(unittest.TestCase):
         p = Project()
         p.import_plan([node("DF-001", requirement_ids=["REQ-001"])])
         p.activate()
-        code, out = complete_node(p)
+        p.run("start", "DF-001")
+        p.write_evidence(evidence={
+            "requirement_acceptance": [
+                {"req_id": "REQ-001", "criterion": "ok", "met": True, "evidence": "test_x"},
+            ],
+        })
+        p.run("sync", "DF-001")
+        code, out = p.run("accept", "DF-001")
         self.assertEqual(code, 0, out)
         # 需求表在节点完成后再写：带非法状态的追踪表本来就不该通过计划导入
         code, out = write_traceability(p, requirements)
@@ -128,7 +135,12 @@ class RegressionCoverageTest(unittest.TestCase):
         try:
             p.import_plan([node("DF-001", requirement_ids=["REQ-002"])])
             p.activate()
-            code, out = complete_node(p)
+            p.run("start", "DF-001")
+            p.write_evidence(evidence={"requirement_acceptance": [
+                {"req_id": "REQ-002", "criterion": "ok", "met": True, "evidence": "test_x"},
+            ]})
+            p.run("sync", "DF-001")
+            code, out = p.run("accept", "DF-001")
             self.assertEqual(code, 0, out)
             code, out = write_traceability(p, [
                 {"req_id": "REQ-001", "title": "旧需求", "category": "functional",
@@ -148,7 +160,12 @@ class RegressionCoverageTest(unittest.TestCase):
         try:
             p.import_plan([node("DF-001", requirement_ids=["REQ-002"])])
             p.activate()
-            code, out = complete_node(p)
+            p.run("start", "DF-001")
+            p.write_evidence(evidence={"requirement_acceptance": [
+                {"req_id": "REQ-002", "criterion": "ok", "met": True, "evidence": "test_x"},
+            ]})
+            p.run("sync", "DF-001")
+            code, out = p.run("accept", "DF-001")
             self.assertEqual(code, 0, out)
             code, out = write_traceability(p, [
                 {"req_id": "REQ-001", "title": "旧需求", "category": "functional",
@@ -209,12 +226,14 @@ class RegressionJsonTest(unittest.TestCase):
         self.p = Project()
         self.p.import_plan([node("DF-001")])
         self.p.activate()
+        # 回归报告必须绑定前置快照：先跑一次 regression-check（这里只关心快照）
+        self.p.run("regression-check")
 
     def tearDown(self):
         self.p.close()
 
     def _import(self, payload):
-        path = self.p.root / "reg.json"
+        path = Path(tempfile.mkdtemp()) / "reg.json"
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return self.p.run("regression-import", "--file", str(path))
 
@@ -286,6 +305,79 @@ class RegressionJsonTest(unittest.TestCase):
     @staticmethod
     def _fail_build(data):
         data["checks"][0].update({"status": "failed", "exit_code": 1, "notes": "构建失败"})
+
+    # ---- P0-01：必需检查项不能由报告自己降级 ----
+
+    def _without(self, data, check_id):
+        data["checks"] = [c for c in data["checks"] if c["check_id"] != check_id]
+
+    def test_required_false_downgrade_rejected(self):
+        payload = regression_payload()
+        for item in payload["checks"]:
+            if item["check_id"] == "build":
+                item["required"] = False
+        code, out = self._import(payload)
+        self.assertEqual(code, 2, out)
+        self.assertIn("不能降级", out)
+
+    def test_unit_test_required_false_rejected(self):
+        payload = regression_payload()
+        for item in payload["checks"]:
+            if item["check_id"] == "unit_test":
+                item["required"] = False
+        code, out = self._import(payload)
+        self.assertEqual(code, 2, out)
+        self.assertIn("unit_test", out)
+
+    def test_missing_required_check_rejected_again(self):
+        payload = regression_payload()
+        self._without(payload, "build")
+        code, out = self._import(payload)
+        self.assertEqual(code, 2, out)
+        self.assertIn("缺少必需检查项 build", out)
+
+    def test_duplicate_check_id_rejected(self):
+        payload = regression_payload()
+        payload["checks"].append(dict(payload["checks"][0]))
+        code, out = self._import(payload)
+        self.assertEqual(code, 2, out)
+        self.assertIn("重复", out)
+
+    def test_unknown_required_check_rejected(self):
+        payload = regression_payload()
+        payload["checks"].append({
+            "check_id": "security_scan", "name": "安全扫描", "required": True,
+            "status": "passed", "command": "scan", "exit_code": 0,
+            "executed_at": "2026-11-25T15:00:00+08:00", "evidence": "ok", "notes": "",
+        })
+        code, out = self._import(payload)
+        self.assertEqual(code, 2, out)
+        self.assertIn("不在质量配置", out)
+
+    def test_required_skipped_cannot_pass(self):
+        """必需项 skipped 的报告可以留档，但不能进交付。"""
+        payload = regression_payload(status="not_run")
+        for item in payload["checks"]:
+            if item["check_id"] == "integration":
+                item.update({"status": "skipped", "command": None, "exit_code": None,
+                             "evidence": None, "notes": "环境不满足"})
+        code, out = self._import(payload)
+        self.assertEqual(code, 1, out)          # 留档可以，但不能宣称通过
+        self.assertIn("not_run", out)
+        code, out = self.p.run("release")
+        self.assertEqual(code, 1, out)
+        self.assertIn("回归", out)
+
+    def test_optional_failed_does_not_block(self):
+        """可选检查项失败默认只记录，不影响整体结论（配置可改）。"""
+        payload = regression_payload()
+        payload["checks"].append({
+            "check_id": "permission", "name": "权限", "required": False,
+            "status": "failed", "command": "pytest tests/permission", "exit_code": 1,
+            "executed_at": "2026-11-25T15:00:00+08:00", "evidence": "1 failed", "notes": "本期无鉴权",
+        })
+        code, out = self._import(payload)
+        self.assertEqual(code, 0, out)
 
 
 class ExternalReportTest(unittest.TestCase):
@@ -419,6 +511,121 @@ class GitVerificationTest(unittest.TestCase):
             p.close()
 
 
+class GitScopeTest(unittest.TestCase):
+    """P0-02：Git 实际变更必须一起过 files_scope。"""
+
+    def _git(self, p, *args):
+        return subprocess.run(
+            ["git", "-C", str(p.root), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+
+    def _project(self, scope=("a.py",), profile=None):
+        p = Project()
+        self._git(p, "init", "-q")
+        self._git(p, "config", "user.name", "t")
+        self._git(p, "config", "user.email", "t@t")
+        (p.root / "a.py").write_text("v1", encoding="utf-8")
+        self._git(p, "add", "a.py")
+        self._git(p, "commit", "-q", "-m", "base")
+        if profile:
+            data = core.load_json(p.paths.project)
+            data["quality_profile"] = profile
+            core.atomic_write_json(p.paths.project, data)
+        p.import_plan([node("DF-001", files_scope=list(scope))])
+        p.activate()
+        p.run("start", "DF-001")
+        return p
+
+    def test_unreported_out_of_scope_file_blocks(self):
+        p = self._project()
+        try:
+            (p.root / "a.py").write_text("v2", encoding="utf-8")
+            (p.root / "b.py").write_text("new", encoding="utf-8")
+            p.write_evidence(evidence={"modified_files": ["a.py"]})
+            code, out = p.run("sync", "DF-001")
+            self.assertEqual(code, 1, out)
+            item = p.node()
+            self.assertTrue(any("b.py" in v for v in item["scope_violations"]), item["scope_violations"])
+            self.assertTrue(any("b.py" in d for d in item["git_discrepancies"]))
+            code, out = p.run("accept", "DF-001")
+            self.assertEqual(code, 1, out)
+            self.assertIn("越界", out)
+        finally:
+            p.close()
+
+    def test_reported_but_unchanged_kept_as_discrepancy(self):
+        p = self._project(scope=("a.py", "c.py"))
+        try:
+            (p.root / "a.py").write_text("v2", encoding="utf-8")
+            p.write_evidence(evidence={"modified_files": ["a.py", "c.py"]})
+            code, out = p.run("sync", "DF-001")
+            self.assertEqual(code, 0, out)
+            item = p.node()
+            self.assertEqual(item["scope_violations"], [])
+            self.assertTrue(any("c.py" in d for d in item["git_discrepancies"]))
+        finally:
+            p.close()
+
+    def test_missing_modified_files_rejected(self):
+        p = self._project()
+        try:
+            p.write_evidence(evidence={"modified_files": None})
+            code, out = p.run("sync", "DF-001")
+            self.assertEqual(code, 1, out)
+            self.assertIn("缺少 modified_files", out)
+            self.assertEqual(p.node()["status"], "failed")
+        finally:
+            p.close()
+
+    def test_git_required_blocks_when_unavailable(self):
+        p = Project()  # 不是 git 仓库
+        try:
+            data = core.load_json(p.paths.project)
+            data["quality_profile"] = "production"
+            core.atomic_write_json(p.paths.project, data)
+            p.import_plan([node("DF-001")])
+            p.activate()
+            p.run("start", "DF-001")
+            p.write_evidence()
+            code, out = p.run("sync", "DF-001")
+            self.assertEqual(code, 1, out)
+            self.assertIn("Git 变更检测不可用", out)
+            self.assertTrue(p.node().get("git_unavailable"))
+        finally:
+            p.close()
+
+    def test_ack_changes_cannot_bypass_scope(self):
+        p = self._project()
+        try:
+            (p.root / "a.py").write_text("v2", encoding="utf-8")
+            (p.root / "b.py").write_text("new", encoding="utf-8")
+            p.write_evidence(evidence={"modified_files": ["a.py"]})
+            p.run("sync", "DF-001")
+            code, out = p.run("accept", "DF-001", "--ack-changes", "--reason", "只是确认差异")
+            self.assertEqual(code, 1, out)
+            self.assertIn("越界", out)
+        finally:
+            p.close()
+
+    def test_allow_scope_requires_reason(self):
+        p = self._project()
+        try:
+            (p.root / "a.py").write_text("v2", encoding="utf-8")
+            (p.root / "b.py").write_text("new", encoding="utf-8")
+            p.write_evidence(evidence={"modified_files": ["a.py"]})
+            p.run("sync", "DF-001")
+            code, out = p.run("accept", "DF-001", "--allow-scope")
+            self.assertEqual(code, 1, out)
+            self.assertIn("越界", out)
+            code, out = p.run("accept", "DF-001", "--allow-scope", "--reason", "必须改的共享模块")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(p.node()["status"], "completed")
+            self.assertEqual(len(p.node()["scope_waivers"]), 1)
+        finally:
+            p.close()
+
+
 class ParallelSafetyTest(unittest.TestCase):
     """P1-6：同组节点有间接依赖或资源冲突就不能激活。"""
 
@@ -467,7 +674,8 @@ class ParallelSafetyTest(unittest.TestCase):
                 node("DF-002", files_scope=["src/service/api.py"], parallelizable=True, parallel_group="A"),
             ],
             parallel_exceptions=[{
-                "group": "A", "reason": "两块代码互不影响，已评审", "approved_by": "架构师",
+                "group": "A", "nodes": ["DF-001", "DF-002"],
+                "reason": "两块代码互不影响，已评审", "approved_by": "架构师",
             }],
         )
         try:
@@ -605,7 +813,8 @@ class DependencyCheckParallelTest(unittest.TestCase):
                 node("DF-002", db_objects=["accounts"], parallelizable=True, parallel_group="A"),
             ],
             parallel_exceptions=[{
-                "group": "A", "reason": "只读字段，已和 DBA 确认", "approved_by": "架构师",
+                "group": "A", "nodes": ["DF-001", "DF-002"],
+                "reason": "只读字段，已和 DBA 确认", "approved_by": "架构师",
             }],
         )
         result = dependency_check.analyse(plan)
@@ -658,6 +867,7 @@ class ChangeBaseVersionTest(unittest.TestCase):
         p.import_plan(
             [node("DF-001", status="completed"), node("DF-002", dependencies=["DF-001"])],
             version=2,
+            based_on={"change_id": "CR-001", "plan_version": 1},
         )
         p.run("prompt-init", "--all", "--plan", "2")
         code, out = p.run("change-new", "--title", "加一个节点", "--type", "add")
@@ -754,7 +964,7 @@ class AcceptedTerminalTest(unittest.TestCase):
         assert code == 0, out
         code, out = p.run("regression-check")
         assert code == 0, out
-        path = p.root / "reg.json"
+        path = Path(tempfile.mkdtemp()) / "reg.json"
         path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
         code, out = p.run("regression-import", "--file", str(path))
         assert code == 0, out

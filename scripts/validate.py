@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dfcore as core
 from dfcore import DevFlowError
 
+SKILL_DIR = Path(__file__).resolve().parent.parent
+
 
 # --------------------------------------------------------------------------
 # JSON Schema 子集校验器
@@ -196,7 +198,12 @@ class Report:
         return not self.errors
 
 
-def load_config(skill_dir: Path) -> dict:
+def load_config(skill_dir: Path, root: Path | None = None) -> dict:
+    """读配置，并按项目的 quality_profile 展开质量门槛。
+
+    全项目只有这一个入口：regression-import / release / release-ready /
+    validate / evidence 校验都用它，避免对同一份报告给出不同结论。
+    """
     config = {}
     for name in ("defaults", "task-rules", "quality-gates"):
         json_path = skill_dir / "config" / f"{name}.json"
@@ -205,7 +212,18 @@ def load_config(skill_dir: Path) -> dict:
             config[name] = core.load_config_file(json_path)
         elif yaml_path.exists():
             config[name] = core.load_config_file(yaml_path)
+    gates = config.get("quality-gates") or {}
+    profile, declared = core.project_profile(root)
+    config["quality-gates"] = core.resolve_gates(gates, profile)
+    config["quality-profile"] = {"name": profile, "declared": declared}
     return config
+
+
+def required_regression_checks(config: dict | None = None) -> list[str]:
+    """必需回归检查项：唯一权威来源是质量配置。"""
+    config = config if config is not None else load_config(SKILL_DIR)
+    gates = (config.get("quality-gates") or {}).get("gates", {})
+    return list((gates.get("regression") or {}).get("required_checks") or [])
 
 
 def validate_all(
@@ -219,7 +237,7 @@ def validate_all(
     report = Report()
     paths = core.Paths(root)
     sv = SchemaValidator(skill_dir / "schemas")
-    config = load_config(skill_dir)
+    config = load_config(skill_dir, root)
     rules = config.get("task-rules", {})
     gates = config.get("quality-gates", {})
 
@@ -441,6 +459,29 @@ def _validate_plan(report, paths, plan, project, req_ids, rules, gates, sv, acti
         report.error("依赖循环：" + " → ".join(cycle))
     if cycles:
         return
+
+    # 契约绑定：声明了 api_contracts / db_objects 就要有可核查的文件
+    require_bindings = bool(
+        ((gates.get("gates", {}) or {}).get("context") or {}).get(
+            "require_contract_bindings", False
+        )
+    )
+    for node in nodes:
+        declared = set(node.get("api_contracts") or []) | set(node.get("db_objects") or [])
+        if not declared:
+            continue
+        bound = {b["id"] for b in core.contract_bindings(node)}
+        missing = sorted(declared - bound)
+        if not missing:
+            continue
+        message = (
+            f"{node['node_id']}: 声明了 {', '.join(missing)}，但没有 contract_bindings 文件绑定，"
+            "无法做契约级变更检测"
+        )
+        if require_bindings:
+            report.error(message)
+        else:
+            report.warn(message)
 
     # 并行组：规则集中在 dfcore.parallel_issues，validate / dependency_check 共用同一套判定
     max_group = parallel_rules.get("max_group_size", 3)

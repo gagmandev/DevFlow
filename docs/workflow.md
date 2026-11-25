@@ -94,6 +94,7 @@ regression-check（节点完成度、证据、需求覆盖、需求验收项证�
   → 问题定位到 REQ 与 DF
   → 修复 → 重跑受影响测试
   → 写 final-report.json → regression-import（校验 + 渲染 Markdown）
+  → 报告绑定 source_snapshot（regression-check 记录的代码快照）
 ```
 
 JSON 是事实来源，整体状态必须与检查项推导结果一致；缺必需检查项直接拒绝导入。
@@ -102,7 +103,8 @@ JSON 是事实来源，整体状态必须与检查项推导结果一致；缺必
 
 ### 阶段 7 · 交付（release → release-ready → release-accept）
 
-`release` 从状态汇总事实（需求、任务、证据、验证分类）并检查交付门槛，状态置
+`release-ready` **只接受 `release_candidate`**：没有交付报告就不能进入待验收，报告还要过
+章节/版本/占位符校验。`release` 从状态汇总事实（需求、任务、证据、验证分类）并检查交付门槛，状态置
 `release_candidate`——**报告生成不等于交付**。`release-ready` 复核门槛后进入
 `release_ready`，最后由用户执行 `release-accept --by` 才变成 `accepted`。
 

@@ -45,6 +45,19 @@
         "additionalProperties": false
       }
     },
+    "source_snapshot": {
+      "type": "object",
+      "description": "执行回归时的源代码快照；由 regression-check 记录、import 绑定",
+      "properties": {
+        "type": { "type": "string", "enum": ["git", "files"] },
+        "head": { "type": ["string", "null"] },
+        "dirty_digest": { "type": "string" },
+        "snapshot_id": { "type": "string" },
+        "file_count": { "type": "integer" },
+        "captured_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
     "notes": { "type": "string" }
   },
   "additionalProperties": false

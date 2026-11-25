@@ -41,6 +41,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 
 # 所有会写全局状态的命令。main() 在执行它们之前统一加锁，
 # 命令内部再读 project.json / backlog 时拿到的就是锁后的最新状态。
+#
+# 新加命令默认放进这里：只有 status/next/task/validate/doctor/self-test 是只读的，
+# tests/test_v14_gates.py 会检查"新增写命令有没有漏加锁"。
 MUTATING_COMMANDS = {
     "project-set",
     "req-import",
@@ -56,10 +59,13 @@ MUTATING_COMMANDS = {
     "retry",
     "cancel",
     "supersede",
+    "board",
+    "graph",
     "change-new",
     "change-set",
     "change-apply",
     "regression-check",
+    "regression-import",
     "release",
     "release-ready",
     "release-accept",
@@ -80,6 +86,7 @@ FROZEN_ON_ACCEPTED = {
     "supersede",
     "plan-activate",
     "regression-check",
+    "regression-import",
     "release",
     "release-ready",
 }
@@ -129,8 +136,8 @@ def ctx(args) -> tuple[Path, core.Paths, core.Project]:
     return root, core.Paths(root), core.Project(root)
 
 
-def load_config() -> dict:
-    return validator.load_config(SKILL_DIR)
+def load_config(root: Path | None = None) -> dict:
+    return validator.load_config(SKILL_DIR, root)
 
 
 def refresh(project: core.Project, plan: dict, quiet: bool = False) -> list[str]:
@@ -216,6 +223,7 @@ def cmd_init(args) -> int:
             "project_id": project_id,
             "project_name": args.name or root.name,
             "project_type": project_type,
+            "quality_profile": args.profile or "development",
             "status": "initialized",
             "created_at": core.now_iso(),
             "updated_at": core.now_iso(),
@@ -232,11 +240,16 @@ def cmd_init(args) -> int:
     else:
         project = core.load_json(paths.project)
         project["project_type"] = project_type
+        if args.profile:
+            project["quality_profile"] = args.profile
+        elif not project.get("quality_profile"):
+            print("! 这份项目档案没有 quality_profile（旧项目），先按 development 门禁处理；"
+                  "要升级请显式设置：df.py project-set --profile production")
 
     if not paths.decisions.exists():
         core.atomic_write_text(paths.decisions, _decisions_seed(project))
 
-    config = load_config()
+    config = load_config(root)
     if config.get("defaults", {}).get("project", {}).get("update_gitignore", True):
         _update_gitignore(root)
 
@@ -282,7 +295,11 @@ def _update_gitignore(root: Path) -> None:
 
 def cmd_project_set(args) -> int:
     _, paths, project = ctx(args)
-    patch = core.load_json(Path(args.patch))
+    patch = core.load_json(Path(args.patch)) if args.patch else {}
+    if getattr(args, "profile", None):
+        patch["quality_profile"] = args.profile
+    if not patch:
+        raise DevFlowError("没有要更新的内容：给 --patch 或 --profile")
     merged = core.deep_merge(project.data, patch)
     sv = validator.SchemaValidator(SKILL_DIR / "schemas")
     errors = sv.validate(merged, "project.schema.json")
@@ -939,6 +956,10 @@ def cmd_start(args) -> int:
     transition(node, "in_progress", owner=args.owner or "code-agent", started_at=core.now_iso())
     _new_attempt(node)
     node["git_baseline"] = core.git_snapshot(paths.root)
+    # 开工前已存在的交付物：空 files_scope 时用它判断"哪些是本轮新增文件"
+    node["scope_baseline"] = [
+        rel for rel in core.deliverable_paths(node) if (paths.root / rel).exists()
+    ]
     node["git_actual_changes"] = []
     node["git_discrepancies"] = []
     archived = []
@@ -1016,10 +1037,10 @@ def cmd_sync(args) -> int:
     _, paths, project = ctx(args)
     plan = project.current_plan()
     node = project.find_node(args.node_id, plan)
-    config = load_config()
+    config = load_config(paths.root)
     gates = config.get("quality-gates", {})
     accept_gates = gates.get("gates", {}).get("node_accept", {})
-    empty_policy = gates.get("gates", {}).get("empty_scope", "warn")
+    empty_policy = gates.get("gates", {}).get("empty_scope", "outputs_only")
 
     if node["status"] in ("completed", "superseded", "cancelled"):
         raise DevFlowError(f"{node['node_id']} 状态是 {node['status']}，不需要同步")
@@ -1074,15 +1095,25 @@ def cmd_sync(args) -> int:
         return 1
 
     modified = (evidence or {}).get("modified_files") or []
-    violations = core.scope_violations(node, modified, paths.root, empty_policy)
-    node["scope_violations"] = violations
 
-    git_gate = gates.get("gates", {}).get("git", {}).get("verify_changes", "warn")
+    # ---- 实际变更核对：Git 看到的改动必须一起进范围校验 ----
+    git_gates = gates.get("gates", {}).get("git", {})
+    git_gate = git_gates.get("verify_changes", "warn")
+    git_required = bool(git_gates.get("required", False))
     discrepancies: list[str] = []
+    actual: list[str] | None = None
     if git_gate != "off":
         actual = core.git_changes_since(paths.root, node.get("git_baseline"))
-        if actual is not None:
-            node["git_actual_changes"] = actual
+        node["git_actual_changes"] = actual or []
+        if actual is None:
+            if git_required:
+                discrepancies.append(
+                    "Git 变更检测不可用（不是 git 仓库 / 项目不是仓库根），"
+                    "当前质量配置要求必须能核对实际变更"
+                )
+            node["git_unavailable"] = True
+        else:
+            node.pop("git_unavailable", None)
             reported = set()
             for item in modified:
                 try:
@@ -1093,7 +1124,19 @@ def cmd_sync(args) -> int:
                 discrepancies.append(f"实际改动但报告未列：{path}")
             for path in sorted(reported - set(actual)):
                 discrepancies.append(f"报告列出但未检测到改动：{path}")
-            node["git_discrepancies"] = discrepancies
+    node["git_discrepancies"] = discrepancies
+
+    # 合并：报告声明 ∪ 实际改动。漏报的越界文件同样必须被拦下。
+    scope_input: list[str] = []
+    for item in list(modified) + list(actual or []):
+        try:
+            norm = core.normalize_rel(item)
+        except ValueError:
+            continue
+        if norm not in scope_input:
+            scope_input.append(norm)
+    violations = core.scope_violations(node, scope_input, paths.root, empty_policy)
+    node["scope_violations"] = violations
 
     transition(node, "needs_review")
     refresh(project, plan)
@@ -1113,7 +1156,7 @@ def cmd_sync(args) -> int:
         print("! Git 实际变更与报告不一致：")
         for item in discrepancies[:10]:
             print(f"  - {item}")
-        if git_gate == "error":
+        if git_gate == "error" or (git_required and node.get("git_unavailable")):
             print("验收已被阻止。确认无误后：accept --ack-changes --reason \"...\"")
             return 1
         print("（配置为 warn，验收前请人工确认）")
@@ -1144,7 +1187,7 @@ def cmd_accept(args) -> int:
     _, paths, project = ctx(args)
     plan = project.current_plan()
     node = project.find_node(args.node_id, plan)
-    gates = load_config().get("quality-gates", {})
+    gates = load_config(paths.root).get("quality-gates", {})
 
     if node["status"] == "completed":
         print(f"{node['node_id']} 已经是 completed")
@@ -1172,9 +1215,11 @@ def cmd_accept(args) -> int:
         node["scope_violations"] = []
         print(f"! 已记录范围豁免：{reason}")
 
-    git_gate = gates.get("gates", {}).get("git", {}).get("verify_changes", "warn")
+    git_gates = gates.get("gates", {}).get("git", {})
+    git_gate = git_gates.get("verify_changes", "warn")
+    git_required = bool(git_gates.get("required", False))
     discrepancies = node.get("git_discrepancies") or []
-    if discrepancies and git_gate == "error":
+    if discrepancies and (git_gate == "error" or git_required):
         allow = getattr(args, "ack_changes", False)
         reason = getattr(args, "reason", None)
         if not (allow and reason):
@@ -1242,7 +1287,7 @@ def cmd_retry(args) -> int:
     node = project.find_node(args.node_id, plan)
     if node["status"] not in ("failed", "blocked"):
         raise DevFlowError(f"{node['node_id']} 状态是 {node['status']}，只有 failed/blocked 需要 retry")
-    max_rounds = load_config().get("defaults", {}).get("workflow", {}).get("max_auto_fix_rounds", 2)
+    max_rounds = load_config(paths.root).get("defaults", {}).get("workflow", {}).get("max_auto_fix_rounds", 2)
     attempts = int(node.get("attempts", 0))
     if attempts >= max_rounds + 1 and not args.force:
         raise DevFlowError(
@@ -1413,8 +1458,9 @@ def cmd_change_apply(args) -> int:
     current_req_version = project.data.get("current_requirement_version")
     base_plan = cr.get("base_plan_version")
     base_req = cr.get("base_requirement_version")
-    if base_plan is not None and current_plan_version is not None and \
-            str(base_plan) != str(current_plan_version):
+    # 当前没有计划时按 0 处理，不能让 None 悄悄跳过基准检查
+    cur_plan = 0 if current_plan_version in (None, "") else current_plan_version
+    if base_plan is not None and str(base_plan) != str(cur_plan):
         raise DevFlowError(
             f"{args.change} 基于计划 v{base_plan}，当前生效计划已是 v{current_plan_version}。\n"
             "基准已过期：必须基于新计划重新评估影响，不能直接套用旧结论。"
@@ -1429,9 +1475,22 @@ def cmd_change_apply(args) -> int:
     plan = core.load_json(paths.backlog(target))
     if plan.get("status") != "draft":
         raise DevFlowError(f"计划 v{target} 状态是 {plan.get('status')}，只有 draft 能激活")
-    if plan.get("based_on") and plan["based_on"].get("change_id") not in (None, args.change):
+
+    # ---- 目标计划必须严格属于这个 CR ----
+    based_on = plan.get("based_on")
+    if not isinstance(based_on, dict) or not based_on.get("change_id"):
         raise DevFlowError(
-            f"计划 v{target} 是 {plan['based_on'].get('change_id')} 生成的，不是 {args.change}"
+            f"计划 v{target} 没有 based_on.change_id，无法证明它由 {args.change} 生成。\n"
+            "变更计划必须在 based_on 里写 {change_id, plan_version}；不接受「来路不明」的新计划。"
+        )
+    if based_on.get("change_id") != args.change:
+        raise DevFlowError(
+            f"计划 v{target} 是 {based_on.get('change_id')} 生成的，不是 {args.change}"
+        )
+    if str(based_on.get("plan_version")) != str(cr.get("base_plan_version")):
+        raise DevFlowError(
+            f"计划 v{target} 的 based_on.plan_version={based_on.get('plan_version')!r}，"
+            f"与 {args.change} 的 base_plan_version={cr.get('base_plan_version')!r} 不一致"
         )
     if cr.get("target_requirement_version") is not None and \
             str(plan.get("requirement_version")) != str(cr["target_requirement_version"]):
@@ -1532,9 +1591,27 @@ def cmd_regression_import(args) -> int:
     if errors:
         raise DevFlowError("回归报告结构校验失败：\n  " + "\n  ".join(errors))
 
-    problems = _regression_data_problems(data, plan, require_pass=False)
+    problems = _regression_data_problems(data, plan, require_pass=False, root=paths.root)
     if problems:
         raise DevFlowError("回归报告不能导入：\n  " + "\n  ".join(problems))
+
+    # 回归报告必须绑定"跑之前那份代码"：代码变了，报告就不作数
+    gates = load_config(paths.root).get("quality-gates", {}).get("gates", {})
+    if (gates.get("regression") or {}).get("require_source_snapshot", True):
+        snap_path = paths.regression / SNAPSHOT_FILE
+        if not snap_path.exists():
+            raise DevFlowError(
+                f"缺少回归前置快照 {paths.rel(snap_path)}；先运行 `df.py regression-check` 记录当前代码"
+            )
+        baseline = core.load_json(snap_path)
+        current = core.source_snapshot(paths.root)
+        if current["snapshot_id"] != baseline.get("snapshot_id"):
+            raise DevFlowError(
+                "代码在回归前置检查之后发生了变化"
+                f"（前置快照 {str(baseline.get('snapshot_id'))[:12]}，当前 {current['snapshot_id'][:12]}）。\n"
+                "这份回归结果不能代表当前代码：请重新执行全量回归，再导入新报告。"
+            )
+        data["source_snapshot"] = baseline
 
     paths.regression.mkdir(parents=True, exist_ok=True)
     archived = _archive_regression(paths)
@@ -1577,40 +1654,70 @@ def _archive_regression(paths: core.Paths) -> str | None:
     return first
 
 
+SNAPSHOT_FILE = "source-snapshot.json"
+
+
+def snapshot_problems(paths: core.Paths, plan: dict, config: dict | None = None) -> list[str]:
+    """回归报告绑定的源码快照是否仍与当前代码一致。"""
+    config = config or load_config(paths.root)
+    gates = config.get("quality-gates", {}).get("gates", {})
+    required = bool((gates.get("regression") or {}).get("require_source_snapshot", True))
+    if not required:
+        return []
+    report_path = paths.regression / REGRESSION_JSON
+    if not report_path.exists():
+        return []  # 缺报告由 regression_problems 报，这里不重复
+    data = core.load_json(report_path)
+    recorded = data.get("source_snapshot")
+    if not isinstance(recorded, dict) or not recorded.get("snapshot_id"):
+        return ["回归报告没有绑定源代码快照（source_snapshot）；重新运行 regression-check 后重新导入"]
+    current = core.source_snapshot(paths.root)
+    if current["snapshot_id"] != recorded["snapshot_id"]:
+        return [
+            "回归报告对应的代码已经变化"
+            f"（报告快照 {str(recorded.get('snapshot_id'))[:12]}，当前 {current['snapshot_id'][:12]}）。"
+            "旧结论已失效，必须重新执行全量回归并导入新报告"
+        ]
+    return []
+
+
 def _requirement_evidence_missing(
     paths: core.Paths,
     req: dict,
     completed_owners: list[dict],
 ) -> bool:
-    """需求的验收标准是否完全没有对应的验证证据。
+    """需求里是否还有验收标准找不到逐条证据。
 
-    "有节点覆盖"不等于"验收标准被验证过"。至少要有一个已完成节点的执行报告
-    给出 met=true 且带证据的验收项，否则这条需求只是"代码写了"，没被验证。
-
-    全部覆盖节点都是历史节点（没有 current_attempt_id）时不阻断，
-    避免升级后旧项目的既有结论集体失效。
+    旧项目（全部覆盖节点都没有 attempt_id）不做追溯，避免历史结论集体失效。
     """
     if not any(o.get("current_attempt_id") for o in completed_owners):
         return False
+    items = core.acceptance_items(req)
+    if not items:
+        return False
+    covered: set[str] = set()
     for owner in completed_owners:
-        if owner.get("no_test"):
-            continue
         evidence = core.load_execution_evidence(paths, owner) or {}
-        entries = evidence.get("acceptance")
-        if not isinstance(entries, list):
-            continue
-        for item in entries:
-            if isinstance(item, dict) and item.get("met") is True and \
-                    str(item.get("evidence") or "").strip():
-                return False
-    return True
+        for entry in evidence.get("requirement_acceptance") or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("req_id") != req.get("req_id"):
+                continue
+            if entry.get("met") is not True:
+                continue
+            if not str(entry.get("evidence") or "").strip():
+                continue
+            covered.add(core.normalize_criterion(entry.get("criterion")))
+    return any(
+        core.normalize_criterion(item["text"]) not in covered for item in items
+    )
 
 
 def cmd_regression_check(args) -> int:
     _, paths, project = ctx(args)
     plan = project.current_plan()
     st = core.stats(plan)
-    gates = load_config().get("quality-gates", {}).get("gates", {}).get("regression", {})
+    gates = load_config(paths.root).get("quality-gates", {}).get("gates", {}).get("regression", {})
 
     blockers: list[str] = []
     open_nodes = [
@@ -1624,7 +1731,7 @@ def cmd_regression_check(args) -> int:
         for node in plan["nodes"]:
             if node["status"] != "completed":
                 continue
-            for problem in core.evidence_problems(paths, node, load_config().get("quality-gates", {}), plan):
+            for problem in core.evidence_problems(paths, node, load_config(paths.root).get("quality-gates", {}), plan):
                 blockers.append(problem)
 
     traceability = core.load_traceability(paths) or {}
@@ -1697,6 +1804,9 @@ def cmd_regression_check(args) -> int:
     out = paths.regression / "precheck.md"
     core.atomic_write_text(out, "\n".join(lines))
 
+    snapshot = core.source_snapshot(paths.root)
+    core.atomic_write_json(paths.regression / SNAPSHOT_FILE, snapshot)
+
     print(f"== 回归前置检查 · 计划 v{plan['plan_version']} ==")
     if blockers:
         print(f"✗ 阻塞 {len(blockers)} 项：")
@@ -1705,6 +1815,7 @@ def cmd_regression_check(args) -> int:
     else:
         print("✓ 没有未完成节点，所有已完成节点证据齐全，需求全部覆盖")
     print(f"检查表：{paths.rel(out)}")
+    print(f"源代码快照：{snapshot['snapshot_id'][:12]}（{snapshot['type']}，{snapshot['file_count']} 个文件）")
     if not blockers:
         project.data["status"] = "regression"
         project.save()
@@ -1718,13 +1829,40 @@ REGRESSION_CONCLUSION_RE = re.compile(r"结论[：:]\s*\**\s*(passed|failed|part
 REGRESSION_JSON = "final-report.json"
 
 
-def derive_regression_status(checks: list[dict]) -> str:
-    required = [c for c in checks if c.get("required", True)]
-    if any(c.get("status") == "failed" for c in required):
+def derive_regression_status(
+    checks: list[dict],
+    required_ids: list[str] | None = None,
+) -> str:
+    """由检查项推导整体状态。
+
+    `required_ids` 来自质量配置——**必需集合不接受报告自己声明**。
+    报告把 build 标成 required=false 也不影响它是必需项这个事实。
+    """
+    required_ids = list(required_ids or [])
+    by_id: dict[str, dict] = {}
+    for check in checks or []:
+        if not isinstance(check, dict):
+            continue
+        cid = check.get("check_id")
+        if cid and cid not in by_id:
+            by_id[cid] = check
+
+    if required_ids:
+        pool = []
+        for rid in required_ids:
+            check = by_id.get(rid)
+            if check is None:
+                return "failed"  # 必需项缺失，绝不可能 passed
+            pool.append(check)
+    else:
+        # 没有配置时退回"报告自述"，供单元测试与旧数据使用
+        pool = [c for c in by_id.values() if c.get("required", True)]
+
+    if any(c.get("status") == "failed" for c in pool):
         return "failed"
-    if any(c.get("status") in ("not_run", "skipped") for c in required):
+    if any(c.get("status") in ("not_run", "skipped") for c in pool):
         return "not_run"
-    if not required:
+    if not pool:
         return "not_run"
     return "passed"
 
@@ -1761,16 +1899,29 @@ def regression_problems(
         ]
 
     data = core.load_json(path)
-    return _regression_data_problems(data, plan)
+    return _regression_data_problems(data, plan, root=paths.root)
 
 
-def _regression_data_problems(data: dict, plan: dict, require_pass: bool = True) -> list[str]:
+def _regression_data_problems(
+    data: dict,
+    plan: dict,
+    require_pass: bool = True,
+    root: Path | None = None,
+) -> list[str]:
     """回归报告语义校验（JSON 已在别处过 Schema）。
 
+    必需集合以质量配置为准：报告不能把配置里的必需项降级成 optional，
+    也不能凭空发明一个"必需项"。
     require_pass=False 时只查"报告是否自洽"，用于导入失败报告留档。
     """
     problems: list[str] = []
+    config = load_config(root)
+    gates = config.get("quality-gates", {}).get("gates", {})
+    regression_gates = gates.get("regression", {})
+    required_ids = list(regression_gates.get("required_checks") or [])
+    block_optional_failures = bool(regression_gates.get("block_optional_failures", False))
     checks = data.get("checks") or []
+
     if data.get("plan_version") != plan.get("plan_version"):
         problems.append(
             f"回归报告的 plan_version={data.get('plan_version')}，当前计划是 v{plan.get('plan_version')}"
@@ -1781,24 +1932,32 @@ def _regression_data_problems(data: dict, plan: dict, require_pass: bool = True)
             f"当前需求是 v{plan.get('requirement_version')}"
         )
 
-    ids = [c.get("check_id") for c in checks]
+    ids = [c.get("check_id") for c in checks if isinstance(c, dict)]
     if len(ids) != len(set(ids)):
         problems.append("回归报告的 check_id 有重复")
 
-    required_ids = (
-        load_config()
-        .get("quality-gates", {})
-        .get("gates", {})
-        .get("regression", {})
-        .get("required_checks", [])
-    )
     for rid in required_ids:
-        if rid not in ids:
+        item = next((c for c in checks if isinstance(c, dict) and c.get("check_id") == rid), None)
+        if item is None:
             problems.append(f"回归报告缺少必需检查项 {rid}")
+        elif item.get("required") is not True:
+            problems.append(
+                f"回归报告把必需检查项 {rid} 标成了 required={item.get('required')!r}；"
+                "必需项由质量配置决定，报告不能降级"
+            )
 
     for check in checks:
+        if not isinstance(check, dict):
+            problems.append("回归报告 checks 里存在非对象项")
+            continue
         cid = check.get("check_id", "?")
+        if check.get("required") is True and cid not in required_ids:
+            problems.append(
+                f"检查项 {cid} 自称必需，但它不在质量配置的 required_checks 里；"
+                "请改 required=false 或把它加进配置"
+            )
         status = check.get("status")
+        is_required = cid in required_ids
         if status == "passed":
             if check.get("exit_code") != 0:
                 problems.append(f"检查项 {cid} 标 passed 但 exit_code={check.get('exit_code')}")
@@ -1807,13 +1966,17 @@ def _regression_data_problems(data: dict, plan: dict, require_pass: bool = True)
             if not str(check.get("evidence") or "").strip():
                 problems.append(f"检查项 {cid} 标 passed 但没有证据")
         elif status == "failed":
-            if require_pass:
-                problems.append(f"检查项 {cid} 失败：{check.get('notes') or '未写原因'}")
+            if is_required and require_pass:
+                problems.append(f"必需检查项 {cid} 失败：{check.get('notes') or '未写原因'}")
+            elif not is_required and require_pass and block_optional_failures:
+                problems.append(f"可选检查项 {cid} 失败（配置要求可选项失败也阻断）")
         elif status in ("not_run", "skipped"):
             if not str(check.get("notes") or "").strip():
                 problems.append(f"检查项 {cid} 是 {status}，但没有写原因")
+            if require_pass and is_required:
+                problems.append(f"必需检查项 {cid} 没有执行（{status}），整体不能 passed")
 
-    derived = derive_regression_status(checks)
+    derived = derive_regression_status(checks, required_ids)
     declared = data.get("status")
     if declared != derived:
         problems.append(f"回归报告整体状态 {declared!r} 与检查项推导结果 {derived!r} 不一致")
@@ -1863,7 +2026,7 @@ def delivery_blockers(
     allow_legacy_regression: bool = False,
 ) -> list[str]:
     """交付条件检查。报告存在 ≠ 回归通过 ≠ 用户验收。"""
-    gates = load_config().get("quality-gates", {})
+    gates = load_config(paths.root).get("quality-gates", {})
     blockers: list[str] = []
 
     for node in plan["nodes"]:
@@ -1876,6 +2039,7 @@ def delivery_blockers(
             blockers.append(problem)
 
     blockers.extend(regression_problems(paths, plan, allow_legacy_regression))
+    blockers.extend(snapshot_problems(paths, plan))
 
     for req in (core.load_traceability(paths) or {}).get("requirements", []):
         if req.get("status") != "active":
@@ -1932,11 +2096,58 @@ def cmd_release(args) -> int:
         lines += [f"- {item}" for item in blockers]
     else:
         lines.append("全部通过。可运行 `df.py release-ready` 进入待验收状态。")
+    notes = str(project.data.get("notes") or "").strip()
+    overview = notes or (
+        f"{project.data['project_name']}（{project.data['project_type']}）。"
+        f"本报告汇总计划 v{plan['plan_version']}（需求基准 v{plan.get('requirement_version')}）"
+        "的需求覆盖、任务完成情况与验证状态；交付范围以需求基准与任务清单为准。"
+    )
+    commands = project.data.get("commands") or {}
+    deploy_lines = []
+    if commands.get("run"):
+        deploy_lines += [
+            f"1. 安装依赖：`{commands.get('install') or '无需安装'}`",
+            f"2. 构建：`{commands.get('build') or '无需构建'}`",
+            f"3. 启动：`{commands.get('run')}`",
+            "4. 启动后按需求基准逐条验收；无外部服务依赖。",
+        ]
+    else:
+        deploy_lines.append(
+            "不适用：项目未配置运行命令，交付物是代码库本身（没有独立服务端入口）。"
+            f"复现方式见上一节的安装/构建/测试命令。"
+        )
+
+    config_lines = []
+    stack = project.data.get("tech_stack") or {}
+    if stack:
+        config_lines += [f"- 技术栈：{key} = {value}" for key, value in stack.items()]
+    else:
+        config_lines.append("- 技术栈：Python 3.8+（仅标准库）")
+    config_lines.append("- 外部服务：无（不依赖数据库、消息队列或第三方 API）")
+    config_lines.append("- 环境变量与密钥：无；不要在本报告中写入任何真实凭据")
+
+    leftovers = []
+    for node in nodes:
+        if node["status"] in ("superseded", "cancelled"):
+            continue
+        evidence = core.load_execution_evidence(paths, node) or {}
+        for item in evidence.get("leftovers") or []:
+            leftovers.append(f"{node['node_id']}：{item}")
+    if leftovers:
+        known_issues = ["已知遗留（来自节点执行报告）：", ""] + [f"- {item}" for item in leftovers]
+    elif blockers:
+        known_issues = ["本报告生成时仍有交付门槛未通过：", ""] + [f"- {item}" for item in blockers]
+    else:
+        known_issues = [
+            f"无已知问题：{core.now_iso()} 生成报告时回归结论为 passed，"
+            "且没有节点遗留问题。"
+        ]
+
     lines += [
         "",
         "## 1. 项目概述",
         "",
-        project.data.get("notes") or "（待补充：项目目标与交付范围）",
+        overview,
         "",
         "## 2. 需求完成情况",
         "",
@@ -1949,7 +2160,7 @@ def cmd_release(args) -> int:
         status = "已验证" if done and owners else ("未完成" if not done else "未验证")
         lines.append(f"| {req['req_id']} | {req.get('title', '')} | {', '.join(owners) or '-'} | {status} |")
     if not traceability.get("requirements"):
-        lines.append("| - | （无需求追踪表） | - | - |")
+        lines.append("| - | 本项目没有需求追踪表（基础设施或工具类交付） | - | 不适用 |")
 
     lines += ["", "## 3. 任务完成情况", "", "| 节点 | 名称 | 状态 | 测试证据 |", "| --- | --- | --- | --- |"]
     for node in nodes:
@@ -1960,6 +2171,17 @@ def cmd_release(args) -> int:
             if report else ("no_test" if node.get("no_test") else "缺失")
         )
         lines.append(f"| {node['node_id']} | {node['node_name']} | {node['status']} | {evidence} |")
+
+    regression_path = paths.regression / REGRESSION_JSON
+    regression_summary = "（尚未导入机器可读回归报告）"
+    if regression_path.exists():
+        regression = core.load_json(regression_path)
+        passed_checks = [c for c in regression.get("checks", []) if c.get("status") == "passed"]
+        regression_summary = (
+            f"- 回归结论：**{regression.get('status')}**"
+            f"（{len(passed_checks)}/{len(regression.get('checks') or [])} 项通过，"
+            f"执行于 {regression.get('executed_at')}）"
+        )
 
     lines += [
         "",
@@ -1972,32 +2194,29 @@ def cmd_release(args) -> int:
         "",
         "## 5. 构建与测试",
         "",
-        f"- 安装：{project.data.get('commands', {}).get('install') or '（未配置）'}",
-        f"- 构建：{project.data.get('commands', {}).get('build') or '（未配置）'}",
-        f"- 测试：{project.data.get('commands', {}).get('test') or '（未配置）'}",
-        "",
-        "（把回归报告里的实际命令与退出码粘到这里）",
+        f"- 安装：{commands.get('install') or '（未配置，无需安装）'}",
+        f"- 构建：{commands.get('build') or '（未配置，无需构建）'}",
+        f"- 测试：{commands.get('test') or '（未配置）'}",
+        regression_summary,
         "",
         "## 6. 部署说明",
         "",
-        "（待补充：部署步骤、依赖环境、启动命令）",
-        "",
-        "## 7. 配置项清单",
-        "",
-        "（待补充：环境变量、端口、外部服务地址；不要写入真实密钥）",
-        "",
-        "## 8. 已知问题与限制",
-        "",
-        "（待补充：来自回归报告与节点执行报告的遗留问题）",
+    ]
+    lines += deploy_lines
+    lines += ["", "## 7. 配置项清单", ""]
+    lines += config_lines
+    lines += ["", "## 8. 已知问题与限制", ""]
+    lines += known_issues
+    lines += [
         "",
         "## 9. 风险",
         "",
-        "（待补充）",
+        "- 本报告基于导入的回归报告与节点证据；外部环境差异（操作系统、依赖版本）未单独验证。",
         "",
         "## 10. 最终验收",
         "",
         "- [ ] 用户已确认交付范围（确认后运行 `df.py release-accept --by 用户名`）",
-        "- [ ] 回归报告已归档",
+        f"- [ ] 回归报告 final-report.json（计划 v{plan['plan_version']}）已归档",
         "- [ ] 部署说明可执行",
         "",
     ]
@@ -2011,6 +2230,22 @@ def cmd_release(args) -> int:
         shutil.copy2(out, hist / f"release-report.{stamp}.md")
 
     core.atomic_write_text(out, "\n".join(lines))
+    meta = {
+        "schema_version": "1.0",
+        "plan_version": plan["plan_version"],
+        "requirement_version": plan.get("requirement_version"),
+        "generated_at": core.now_iso(),
+        "generated_by": "df.py release",
+        "status": "release_candidate",
+        "blockers": blockers,
+        "sections": list(md_sections("\n".join(lines)).keys()),
+        "counts": {
+            "verified": len(verified),
+            "implemented_unverified": len(implemented_unverified),
+            "missing": len(missing),
+        },
+    }
+    core.atomic_write_json(paths.releases / RELEASE_META, meta)
     project.data["status"] = "release_candidate"
     project.data["release_candidate_at"] = core.now_iso()
     project.save()
@@ -2029,24 +2264,147 @@ def cmd_release(args) -> int:
     return 0
 
 
+RELEASE_MD = "release-report.md"
+RELEASE_META = "release-report.json"
+SECTION_RE = re.compile(r"^##\s+(?:(\d+)[.、]?\s*)?(.+?)\s*$")
+
+
+def md_sections(text: str) -> dict[str, str]:
+    """把 Markdown 按二级标题切开：标题 → 正文（不含标题行）。"""
+    sections: dict[str, str] = {}
+    current = None
+    buffer: list[str] = []
+    for line in text.splitlines():
+        match = SECTION_RE.match(line)
+        if match:
+            if current is not None:
+                sections[current] = "\n".join(buffer).strip()
+            current = match.group(2).strip()
+            buffer = []
+        elif current is not None:
+            buffer.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buffer).strip()
+    return sections
+
+
+def _find_section(sections: dict[str, str], name: str) -> tuple[str | None, str]:
+    for title, body in sections.items():
+        if name in title:
+            return title, body
+    return None, ""
+
+
+def release_report_problems(
+    paths: core.Paths,
+    project: core.Project,
+    plan: dict,
+    config: dict | None = None,
+) -> list[str]:
+    """交付报告是否完整、是否对应当前计划。
+
+    只检查"能不能证明写完了"：文件在、版本对、章节有实质内容、没有占位词。
+    """
+    config = config or load_config(paths.root)
+    gates = config.get("quality-gates", {}).get("gates", {})
+    release_gates = gates.get("release", {})
+    spec = config.get("quality-gates", {}).get("release_report") or {}
+    placeholders = config.get("quality-gates", {}).get("placeholders") or []
+    required_sections = spec.get("required_sections") or []
+    na_pattern = spec.get("not_applicable_pattern") or "不适用"
+
+    problems: list[str] = []
+    md_path = paths.releases / RELEASE_MD
+    meta_path = paths.releases / RELEASE_META
+
+    if not md_path.exists():
+        return [f"缺少交付报告 {paths.rel(md_path)}；先运行 `df.py release` 生成"]
+
+    text = core.read_text(md_path)
+    sections = md_sections(text)
+
+    if meta_path.exists():
+        meta = core.load_json(meta_path)
+        if meta.get("plan_version") != plan.get("plan_version"):
+            problems.append(
+                f"交付报告对应计划 v{meta.get('plan_version')}，当前计划是 v{plan.get('plan_version')}"
+            )
+        if meta.get("requirement_version") != plan.get("requirement_version"):
+            problems.append(
+                f"交付报告对应需求 v{meta.get('requirement_version')}，"
+                f"当前需求是 v{plan.get('requirement_version')}"
+            )
+    else:
+        problems.append(
+            f"缺少交付报告元信息 {paths.rel(meta_path)}（版本绑定）；重新运行 `df.py release`"
+        )
+
+    for name in required_sections:
+        title, body = _find_section(sections, name)
+        if title is None:
+            problems.append(f"交付报告缺少「{name}」章节")
+            continue
+        if not body.strip():
+            problems.append(f"交付报告「{title}」章节为空")
+            continue
+        hits = [p for p in placeholders if p and p in body]
+        if hits:
+            problems.append(f"交付报告「{title}」还有占位内容：{'、'.join(hits[:3])}")
+            continue
+        if na_pattern in body:
+            reason = body.replace(na_pattern, "").strip(" ：:。.\n-")
+            if len(reason) < 6:
+                problems.append(f"交付报告「{title}」写了不适用，但没有说明原因")
+    return problems
+
+
+def delivery_gate_problems(
+    paths: core.Paths,
+    project: core.Project,
+    plan: dict,
+    allow_legacy_regression: bool = False,
+) -> tuple[list[str], list[str]]:
+    """返回 (交付门槛问题, 交付报告问题)，供 release-ready / release-accept 共用。"""
+    config = load_config(paths.root)
+    release_gates = config.get("quality-gates", {}).get("gates", {}).get("release", {})
+    legacy_shortcut = bool(project.data.get("legacy_release_shortcut"))
+
+    blockers = delivery_blockers(paths, project, plan, allow_legacy_regression)
+    report_problems: list[str] = []
+    if release_gates.get("require_release_report", True) and not legacy_shortcut:
+        report_problems = release_report_problems(paths, project, plan, config)
+    return blockers, report_problems
+
+
 def cmd_release_ready(args) -> int:
     _, paths, project = ctx(args)
     status = project.effective_status()
     if status == "accepted":
         raise DevFlowError("项目已验收")
-    if status not in ("regression", "release_candidate"):
+    config = load_config(paths.root)
+    release_gates = config.get("quality-gates", {}).get("gates", {}).get("release", {})
+    legacy_shortcut = bool(project.data.get("legacy_release_shortcut"))
+    allowed = {"release_candidate"}
+    if legacy_shortcut or not release_gates.get("require_release_candidate", True):
+        allowed.add("regression")
+    if status not in allowed:
         raise DevFlowError(
-            f"当前状态是 {status}，只有 regression / release_candidate 才能进入待验收。先跑回归并生成交付报告。"
+            f"当前状态是 {status}，只有 release_candidate 才能进入待验收。"
+            "先生成交付报告：`df.py release`（旧项目可用 `df.py migrate --legacy-release` 开兼容）"
         )
     plan = project.current_plan()
-    blockers = delivery_blockers(
+    blockers, report_problems = delivery_gate_problems(
         paths, project, plan, project.data.get("legacy_regression_accepted", False)
     )
-    if blockers:
-        print(f"✗ 交付条件未满足（{len(blockers)} 项）：")
+    if blockers or report_problems:
+        print(f"✗ 交付条件未满足（{len(blockers) + len(report_problems)} 项）：")
         for item in blockers:
             print(f"  - {item}")
+        for item in report_problems:
+            print(f"  - {item}")
         return 1
+    if legacy_shortcut:
+        print("! 这是旧项目的兼容路径（legacy_release_shortcut），交付报告按降级方式处理")
     project.data["status"] = "release_ready"
     project.data["release_ready_at"] = core.now_iso()
     project.save()
@@ -2068,13 +2426,17 @@ def cmd_release_accept(args) -> int:
     if not args.by:
         raise DevFlowError("必须用 --by 记录验收人（例如 --by \"张三\"）")
     plan = project.current_plan()
-    blockers = delivery_blockers(
+    # 不能因为之前 release-ready 通过就跳过复查：期间代码/证据可能已经变了
+    blockers, report_problems = delivery_gate_problems(
         paths, project, plan, project.data.get("legacy_regression_accepted", False)
     )
-    if blockers:
-        print(f"✗ 交付条件已变化，不能验收（{len(blockers)} 项）：")
+    if blockers or report_problems:
+        print(f"✗ 交付条件已变化，不能验收（{len(blockers) + len(report_problems)} 项）：")
         for item in blockers:
             print(f"  - {item}")
+        for item in report_problems:
+            print(f"  - {item}")
+        print("重新跑回归并生成交付报告后再验收。")
         return 1
     project.data["status"] = "accepted"
     project.data["accepted_at"] = core.now_iso()
@@ -2192,11 +2554,12 @@ class _SelfTest:
             self._tmp.cleanup()
 
     # -- 基础设施 ---------------------------------------------------------
-    def run(self, step: str, argv: list[str], allow: tuple[int, ...] = (0,)) -> bool:
+    def run(self, step: str, argv: list[str], allow: tuple[int, ...] = (0,),
+            root: Path | None = None) -> bool:
         buf_out, buf_err = io.StringIO(), io.StringIO()
         with redirect_stdout(buf_out), redirect_stderr(buf_err):
             try:
-                code = main([*argv, "--project", str(self.root)])
+                code = main([*argv, "--project", str(root or self.root)])
             except DevFlowError as exc:  # 提前失败也要记进步骤
                 code = 2
                 buf_err.write(str(exc))
@@ -2286,43 +2649,61 @@ class _SelfTest:
         }
 
     def node_evidence(self, node_id: str, name: str, criteria: list[str], plan_version: int,
-                      modified: list[str]) -> None:
-        plan = core.load_json(core.Paths(self.root).backlog(plan_version))
+                      modified: list[str], root: Path | None = None,
+                      result: str = "success", test_status: str = "passed",
+                      test_failed: int = 0) -> None:
+        root = Path(root or self.root)
+        plan = core.load_json(core.Paths(root).backlog(plan_version))
         item = next(n for n in plan["nodes"] if n["node_id"] == node_id)
         attempt = item.get("current_attempt_id")
+        trace = core.load_traceability(core.Paths(root)) or {}
+        by_req = {r.get("req_id"): r for r in trace.get("requirements", [])}
+        requirement_acceptance = []
+        for req_id in item.get("requirement_ids") or []:
+            for entry in core.acceptance_items(by_req.get(req_id) or {}):
+                requirement_acceptance.append({
+                    "req_id": req_id,
+                    "criterion": entry["text"],
+                    "met": True,
+                    "evidence": f"self-test: {name}",
+                })
         evidence = {
             "node_id": node_id,
             "attempt_id": attempt,
             "plan_version": plan_version,
             "requirement_version": plan["requirement_version"],
-            "result": "success",
+            "result": result,
             "modified_files": modified,
             "acceptance": [
                 {"criterion": c, "met": True, "evidence": f"self-test: {name}"} for c in criteria
             ],
+            "requirement_acceptance": requirement_acceptance,
             "assumptions": [],
             "leftovers": [],
         }
+        failed = int(test_failed)
+        passed = 1 - failed if failed in (0, 1) else 0
         report = {
             "node_id": node_id,
             "attempt_id": attempt,
             "plan_version": plan_version,
             "requirement_version": plan["requirement_version"],
-            "status": "passed",
+            "status": test_status,
             "executed_at": core.now_iso(),
-            "commands": [{"cmd": "self-test simulated", "exit_code": 0}],
-            "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0},
-            "cases": [{"name": name, "result": "pass"}],
+            "commands": [{"cmd": "self-test simulated", "exit_code": 0 if not failed else 1}],
+            "summary": {"total": 1, "passed": passed, "failed": failed, "skipped": 0},
+            "cases": [{"name": name, "result": "pass" if not failed else "fail"}],
         }
-        self.write(
-            f".devflow/nodes/{node_id}/execution-report.md",
+        node_dir = Path(root) / ".devflow" / "nodes" / node_id
+        node_dir.mkdir(parents=True, exist_ok=True)
+        (node_dir / "execution-report.md").write_text(
             "# 执行报告\n\n```devflow-execution\n"
             + json.dumps(evidence, ensure_ascii=False, indent=2)
             + "\n```\n",
+            encoding="utf-8",
         )
-        self.write(
-            f".devflow/nodes/{node_id}/test-report.json",
-            json.dumps(report, ensure_ascii=False, indent=2),
+        (node_dir / "test-report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     def complete(self, node_id: str, name: str, criteria: list[str], plan_version: int,
@@ -2335,6 +2716,216 @@ class _SelfTest:
         if not self.run("sync", ["sync", node_id]):
             return False
         return self.run("accept", ["accept", node_id])
+
+    # -- 子场景 -----------------------------------------------------------
+    def _write_root(self, root: Path, rel: str, text: str) -> None:
+        path = Path(root) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _node(self, node_id: str, scope: str, group: str | None = None) -> dict:
+        return {
+            "node_id": node_id, "node_name": f"节点 {node_id}", "phase": "Foundation",
+            "type": "business", "priority": "P1", "description": f"写 {scope}",
+            "requirement_ids": [], "dependencies": [], "parallelizable": bool(group),
+            "parallel_group": group, "acceptance_criteria": [f"{scope} 存在"],
+            "inputs": [], "outputs": [scope], "files_scope": [scope],
+            "test_strategy": ["文件存在"], "status": "pending",
+            "prompt_file": f".devflow/nodes/{node_id}/prompt.md",
+        }
+
+    def _basic_project(self, name: str, nodes: list[dict], tag: str) -> Path | None:
+        root = self.root.parent / name
+        root.mkdir(parents=True, exist_ok=True)
+        if not self.run(f"{tag}:init", ["init", "--name", name, "--id", name], root=root):
+            return None
+        self._write_root(root, ".devflow/requirements/confirmed-requirements-v1.md",
+                         SELF_TEST_REQUIREMENTS)
+        trace = root / "trace.json"
+        trace.write_text(json.dumps({
+            "schema_version": "1.0", "requirement_version": 1,
+            "requirements": [{
+                "req_id": "REQ-001", "title": "占位", "category": "functional",
+                "status": "active", "acceptance": ["命令退出码为 0"],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        ok = (
+            self.run(f"{tag}:req-import", ["req-import", "--file", str(trace), "--version", "1"], root=root)
+            and self.run(f"{tag}:req-confirm", ["req-confirm", "--version", "1"], root=root)
+        )
+        trace.unlink(missing_ok=True)
+        if not ok:
+            return None
+        plan = root / "plan.json"
+        plan.write_text(json.dumps({"requirement_version": 1, "nodes": nodes}, ensure_ascii=False),
+                        encoding="utf-8")
+        ok = (
+            self.run(f"{tag}:plan-import", ["plan-import", "--file", str(plan), "--version", "1"], root=root)
+            and self.run(f"{tag}:prompt-init", ["prompt-init", "--all"], root=root)
+            and self.run(f"{tag}:activate", ["plan-activate", "--version", "1", "--by", "self-test"], root=root)
+        )
+        return root if ok else None
+
+    def parallel_scenario(self) -> bool:
+        """两个无依赖节点同组并行：两个进程同时 start，不能丢状态。"""
+        nodes = [
+            self._node("DF-101", "p1/a.py", group="A"),
+            self._node("DF-102", "p2/b.py", group="A"),
+        ]
+        root = self._basic_project("parallel", nodes, "parallel")
+        if root is None:
+            return False
+
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "start", n["node_id"],
+                 "--project", str(root)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            for n in nodes
+        ]
+        codes = []
+        for proc in procs:
+            out, _ = proc.communicate(timeout=120)
+            codes.append((proc.returncode, out.decode("utf-8", "replace")))
+        started = all(code == 0 for code, _ in codes)
+        self.steps.append({
+            "step": "parallel:start",
+            "status": "passed" if started else "failed",
+            "exit_code": 0 if started else 1,
+            "detail": "两个进程同时 start" if started else codes[0][1][:120],
+        })
+        if not started:
+            return False
+
+        ok = True
+        for n in nodes:
+            nid = n["node_id"]
+            scope = n["files_scope"][0]
+            self._write_root(root, scope, "x\n")
+            self.node_evidence(nid, f"写 {scope}", n["acceptance_criteria"], 1, [scope], root=root)
+            ok = self.run(f"parallel:sync-{nid}", ["sync", nid], root=root) and ok
+            ok = self.run(f"parallel:accept-{nid}", ["accept", nid], root=root) and ok
+        if not ok:
+            return False
+
+        plan = core.load_json(core.Paths(root).backlog(1))
+        statuses = {n["node_id"]: n["status"] for n in plan["nodes"]}
+        attempts = {n.get("current_attempt_id") for n in plan["nodes"]}
+        violations = [v for n in plan["nodes"] for v in (n.get("scope_violations") or [])]
+        board = (core.Paths(root).board(1))
+        board_text = board.read_text(encoding="utf-8") if board.exists() else ""
+        checks = {
+            "状态全部 completed": all(v == "completed" for v in statuses.values()),
+            "attempt_id 互不相同": len(attempts) == len(nodes) and None not in attempts,
+            "没有越界记录": not violations,
+            "看板与 JSON 一致": ("100.0%" in board_text and "completed" in board_text
+                                 and board_text.count("| DF-10") >= len(nodes)),
+        }
+        passed = all(checks.values())
+        self.steps.append({
+            "step": "parallel:verify",
+            "status": "passed" if passed else "failed",
+            "exit_code": 0 if passed else 1,
+            "detail": "；".join(f"{k}={'ok' if v else 'fail'}" for k, v in checks.items()),
+        })
+        return passed
+
+    def external_scenario(self) -> bool:
+        """外部 Agent 报告导入：正常路径 + 五类错误路径。"""
+        nodes = [
+            self._node("DF-201", "ext/a.py"),
+            self._node("DF-202", "ext/b.py"),
+            self._node("DF-203", "ext/c.py"),
+            self._node("DF-204", "ext/d.py"),
+            self._node("DF-205", "ext/e.py"),
+            self._node("DF-206", "ext/f.py"),
+        ]
+        NODE_SCOPE = {n["node_id"]: n["files_scope"][0] for n in nodes}
+        root = self._basic_project("external", nodes, "external")
+        if root is None:
+            return False
+
+        def external_dir(name: str, attempt: str, *, with_test=True, with_block=True,
+                         modified=None, node_id="DF-201", test_status="passed",
+                         test_failed=0, criterion=None) -> Path:
+            base = root.parent / f"ext-{name}"
+            base.mkdir(parents=True, exist_ok=True)
+            evidence = {
+                "node_id": node_id, "attempt_id": attempt, "plan_version": 1,
+                "requirement_version": 1, "result": "success" if not test_failed else "failed",
+                "modified_files": modified if modified is not None else [NODE_SCOPE[node_id]],
+                "acceptance": [{
+                    "criterion": criterion or f"{NODE_SCOPE[node_id]} 存在",
+                    "met": True, "evidence": "t",
+                }],
+            }
+            text = "# 执行报告\n"
+            if with_block:
+                text += "\n```devflow-execution\n" + json.dumps(evidence, ensure_ascii=False) + "\n```\n"
+            (base / "execution-report.md").write_text(text, encoding="utf-8")
+            if with_test:
+                (base / "test-report.json").write_text(json.dumps({
+                    "node_id": node_id, "attempt_id": attempt, "plan_version": 1,
+                    "requirement_version": 1, "status": test_status,
+                    "executed_at": core.now_iso(),
+                    "commands": [{"cmd": "sim", "exit_code": 0 if not test_failed else 1}],
+                    "summary": {"total": 1, "passed": 1 - test_failed, "failed": test_failed, "skipped": 0},
+                    "cases": [{"name": "c", "result": "pass" if not test_failed else "fail"}],
+                }, ensure_ascii=False), encoding="utf-8")
+            return base
+
+        def attempt_of(nid: str) -> str:
+            plan = core.load_json(core.Paths(root).backlog(1))
+            return next(n for n in plan["nodes"] if n["node_id"] == nid)["current_attempt_id"]
+
+        ok = self.run("external:start", ["start", "DF-201"], root=root)
+        if not ok:
+            return False
+        aid = attempt_of("DF-201")
+        good = external_dir("good", aid)
+        ok = self.run("external:sync", ["sync", "DF-201", "--external", "--from", str(good)], root=root)
+        ok = ok and self.run("external:accept", ["accept", "DF-201"], root=root)
+
+        # 错误路径 1：attempt_id 不对 → 拒绝；随后用正确的仍可导入
+        self.run("external:start-bad", ["start", "DF-202"], root=root)
+        wrong = external_dir("wrong", "deadbeef", node_id="DF-202")
+        self.run("external:bad-attempt", ["sync", "DF-202", "--external", "--from", str(wrong)],
+                 allow=(2,), root=root)
+        right = external_dir("right", attempt_of("DF-202"), node_id="DF-202")
+        ok = self.run("external:sync-after-retry",
+                      ["sync", "DF-202", "--external", "--from", str(right)], root=root) and ok
+
+        # 错误路径 2：缺 test-report
+        self.run("external:start-no-test", ["start", "DF-203"], root=root)
+        no_test = external_dir("no-test", attempt_of("DF-203"), node_id="DF-203", with_test=False)
+        ok = self.run("external:reject-no-test",
+                      ["sync", "DF-203", "--external", "--from", str(no_test)],
+                      allow=(2,), root=root) and ok
+
+        # 错误路径 3：缺证据块
+        self.run("external:start-no-block", ["start", "DF-204"], root=root)
+        no_block = external_dir("no-block", attempt_of("DF-204"), node_id="DF-204", with_block=False)
+        ok = self.run("external:reject-no-block",
+                      ["sync", "DF-204", "--external", "--from", str(no_block)],
+                      allow=(2,), root=root) and ok
+
+        # 错误路径 4：越界
+        self.run("external:start-scope", ["start", "DF-205"], root=root)
+        out_scope = external_dir("scope", attempt_of("DF-205"), node_id="DF-205",
+                                 modified=["ext/e.py", "ext/hack.py"])
+        ok = self.run("external:reject-scope",
+                      ["sync", "DF-205", "--external", "--from", str(out_scope)],
+                      allow=(1,), root=root) and ok
+
+        # 错误路径 5：测试失败
+        self.run("external:start-failed", ["start", "DF-206"], root=root)
+        failed = external_dir("failed", attempt_of("DF-206"), node_id="DF-206",
+                              test_status="failed", test_failed=1)
+        ok = self.run("external:reject-failed-test",
+                      ["sync", "DF-206", "--external", "--from", str(failed)],
+                      allow=(1,), root=root) and ok
+        return ok
 
     # -- 主流程 -----------------------------------------------------------
     def execute(self) -> bool:
@@ -2415,7 +3006,11 @@ class _SelfTest:
 
         if not self.run("regression-check", ["regression-check"]):
             return False
-        reg = self.payload("regression.json", self.regression_payload(2))
+        reg_path = self.root.parent / "regression.json"
+        reg_path.write_text(
+            json.dumps(self.regression_payload(2), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        reg = str(reg_path)
         ok = self.run("regression-import", ["regression-import", "--file", reg]) and \
             self.run("release", ["release"]) and \
             self.run("release-ready", ["release-ready"]) and \
@@ -2427,7 +3022,12 @@ class _SelfTest:
         self.final_status = core.PROJECT_STATUS_MIGRATIONS.get(
             project.get("status"), project.get("status")
         )
-        return self.final_status == "accepted"
+        accepted = self.final_status == "accepted"
+
+        # 两条支线：并行执行、外部 Agent 报告导入
+        parallel_ok = self.parallel_scenario()
+        external_ok = self.external_scenario()
+        return accepted and parallel_ok and external_ok
 
     def report(self) -> dict:
         failed = [s for s in self.steps if s["status"] != "passed"]
@@ -2522,6 +3122,12 @@ def cmd_migrate(args) -> int:
     """把旧版 project.json 升级到当前 schema（不删字段、不重置状态）。"""
     _, paths, project = ctx(args)
     changes = core.migrate_project_data(project.data)
+    if not project.data.get("quality_profile"):
+        project.data["quality_profile"] = getattr(args, "profile", None) or "development"
+        changes.append(f"quality_profile: （未声明）→ {project.data['quality_profile']}")
+    if getattr(args, "legacy_release", False):
+        project.data["legacy_release_shortcut"] = True
+        changes.append("legacy_release_shortcut: 已开启（允许 regression 直接 release_ready，仅供旧项目）")
     if changes:
         project.save()
         print("项目档案已升级：")
@@ -2558,6 +3164,16 @@ def cmd_doctor(args) -> int:
         print("  运行 `df.py recover` 查看，`df.py recover --apply` 回滚。")
     else:
         print("✓ 没有未完成事务")
+
+    # 质量档位
+    profile, declared = core.project_profile(paths.root)
+    if not declared:
+        print("! 项目没有声明 quality_profile（按 development 处理）；"
+              "生产项目请运行 `df.py migrate --profile production`")
+    else:
+        print(f"✓ 质量档位：{profile}")
+    if project.data.get("legacy_release_shortcut"):
+        print("! 已开启 legacy_release_shortcut（旧项目兼容路径，允许跳过交付报告）")
 
     # 旧状态别名
     if project.data.get("status") in core.PROJECT_STATUS_MIGRATIONS:
@@ -2598,10 +3214,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", default=None)
     p.add_argument("--id", default=None)
     p.add_argument("--type", choices=["greenfield", "existing", "refactor"], default=None)
+    p.add_argument("--profile", choices=["development", "production"], default=None,
+                   help="质量门槛档位（默认 development）")
     p.add_argument("--force", action="store_true")
 
-    p = add("project-set", cmd_project_set, "用 patch 文件合并更新 project.json")
-    p.add_argument("--patch", required=True)
+    p = add("project-set", cmd_project_set, "更新 project.json（patch 或质量档位）")
+    p.add_argument("--patch", default=None)
+    p.add_argument("--profile", choices=["development", "production"], default=None,
+                   help="切换质量门槛档位（旧项目升级用）")
 
     p = add("req-import", cmd_req_import, "导入需求追踪表")
     p.add_argument("--file", required=True)
@@ -2710,7 +3330,11 @@ def build_parser() -> argparse.ArgumentParser:
     add("recover", cmd_recover, "处理中断的事务").add_argument(
         "--apply", action="store_true", help="执行回滚"
     )
-    add("migrate", cmd_migrate, "升级旧版项目档案")
+    p = add("migrate", cmd_migrate, "升级旧版项目档案")
+    p.add_argument("--profile", choices=["development", "production"], default=None,
+                   help="升级时同时指定质量档位")
+    p.add_argument("--legacy-release", action="store_true",
+                   help="旧项目兼容：允许跳过 release 直接 release_ready（会记录在项目档案）")
 
     p = add("doctor", cmd_doctor, "全量体检")
     p.add_argument("--plan", type=int, default=None)

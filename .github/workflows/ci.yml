@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.8", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 版本信息
+        shell: bash
+        run: python -V
+
+      - name: 引擎单元/集成测试
+        shell: bash
+        run: python -m unittest discover -s tests -v
+
+      - name: 示例项目测试
+        shell: bash
+        run: |
+          cd examples/sample-project
+          python -m unittest discover -s tests -v
+
+      - name: 示例项目体检
+        shell: bash
+        run: |
+          cd examples/sample-project
+          python ../../scripts/df.py doctor
+
+      - name: 端到端自测（含并行与外部报告支线）
+        shell: bash
+        run: python scripts/df.py self-test --fast
+
+      - name: 全量自测（含分层）
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        shell: bash
+        run: python scripts/df.py self-test --out self-test.json
+
+      - name: 上传自测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-test-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            self-test.json
+          if-no-files-found: ignore

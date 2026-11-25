@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 DF_DIRNAME = ".devflow"
 
 PROJECT_STATUSES = [
@@ -140,6 +140,44 @@ def deep_merge(base: dict, patch: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+#: 质量配置档位。项目在 project.json 里显式选择，不再"一套阈值走天下"。
+QUALITY_PROFILES = ("development", "production")
+
+
+def project_profile(root: Path | None) -> tuple[str, bool]:
+    """读项目声明的质量档位，返回 (profile, declared)。
+
+    `declared=False` 表示旧项目没有这个字段——调用方要给出提示，
+    不能让它默默以为自己跑的是生产门禁。
+    """
+    if root is None:
+        return "development", False
+    path = Path(root) / DF_DIRNAME / "project.json"
+    if not path.exists():
+        return "development", False
+    try:
+        data = load_json(path)
+    except DevFlowError:
+        return "development", False
+    value = data.get("quality_profile")
+    if isinstance(value, str) and value in QUALITY_PROFILES:
+        return value, True
+    return "development", False
+
+
+def resolve_gates(config: dict, profile: str) -> dict:
+    """把 quality-gates 配置按档位展开（base + profile 覆盖）。"""
+    base = dict(config or {})
+    profiles = base.pop("profiles", {}) or {}
+    entry = profiles.get(profile) or {}
+    override = entry.get("gates") if isinstance(entry, dict) else None
+    if not isinstance(override, dict) or not override:
+        override = {}
+    merged = deep_merge(base, {"gates": override}) if override else dict(base)
+    merged["profile"] = profile
+    return merged
 
 
 # --------------------------------------------------------------------------
@@ -309,14 +347,16 @@ class ProjectLock:
         return False
 
 
-_LOCKS: dict[str, tuple[ProjectLock, int]] = {}
+#: (锁文件路径, 线程 id) → (锁对象, 重入深度)
+#: 按线程区分：同一线程可重入，不同线程必须去争 OS 锁，不能共用 depth。
+_LOCKS: dict[tuple[str, int], tuple["ProjectLock", int]] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
 @contextmanager
 def project_lock(df_dir: Path, timeout: float | None = None):
-    """进程内可重入 + 跨进程排他的项目写锁。"""
-    key = str(Path(df_dir).resolve())
+    """同一线程可重入 + 跨线程/跨进程排他的项目写锁。"""
+    key = (str(Path(df_dir).resolve()), threading.get_ident())
     with _LOCKS_GUARD:
         if key in _LOCKS:
             lock, depth = _LOCKS[key]
@@ -363,6 +403,10 @@ def _yaml_scalar(raw: str):
         return False
     if low in ("null", "~"):
         return None
+    if text in ("{}", "{ }"):
+        return {}
+    if text in ("[]", "[ ]"):
+        return []
     if re.fullmatch(r"-?\d+", text):
         return int(text)
     if re.fullmatch(r"-?\d+\.\d+", text):
@@ -601,17 +645,25 @@ def scope_match(path: str, entry: str) -> bool:
 
 
 def _symlink_escape(rel: str, root: Path) -> str | None:
-    """检查路径（含其最近的已存在祖先）是否经符号链接跑到项目根之外。"""
-    root_real = Path(os.path.realpath(str(root)))
+    """检查路径（含其最近的已存在祖先）是否经符号链接跑到项目根之外。
+
+    判定用真实路径的**祖先关系**，不是字符串包含——
+    `/tmp/proj-evil` 包含 `/tmp/proj` 前缀，但它不在项目里面。
+    """
+    root_real = os.path.normcase(os.path.realpath(str(root)))
     probe = root / rel
     while not probe.exists() and probe != root:
         probe = probe.parent
     if not probe.exists():
         return None
-    real = Path(os.path.realpath(str(probe)))
-    if os.path.normcase(str(real)) == os.path.normcase(str(root_real)):
+    real = os.path.normcase(os.path.realpath(str(probe)))
+    if real == root_real:
         return None
-    if os.path.normcase(str(root_real)) in os.path.normcase(str(real)):
+    try:
+        common = os.path.commonpath([root_real, real])
+    except ValueError:  # Windows 不同盘符
+        return "路径经符号链接逃逸出项目根"
+    if os.path.normcase(common) == root_real:
         return None
     return "路径经符号链接逃逸出项目根"
 
@@ -620,22 +672,44 @@ def scope_violations(
     node: dict,
     modified: list,
     root: Path,
-    empty_policy: str = "warn",
+    empty_policy: str = "outputs_only",
 ) -> list[str]:
     """返回所有越界原因（空列表=合规）。
 
-    empty_policy：
-      deny  —— 没有 files_scope 就拒绝验收（严格模式）
-      warn  —— 没有 files_scope 时提示，但不阻断（兼容旧计划）
-      allow —— 没有 files_scope 视为不限制
+    empty_policy（与 config/quality-gates.yaml 的 empty_scope 一一对应）：
+      deny         没有 files_scope 就拒绝验收
+      outputs_only 没有 files_scope 时，只允许改 outputs 中列出、且开工前不存在的文件
+      allow        没有 files_scope 视为不限制
+    旧配置里的 `warn` 按 outputs_only 处理（它从来不是"真的放行"）。
     """
     problems: list[str] = []
     scope = node.get("files_scope") or []
     if not scope:
         if empty_policy == "deny":
             problems.append("节点未定义 files_scope，按策略拒绝验收")
-        elif empty_policy == "warn" and modified:
-            problems.append("节点未定义 files_scope，无法校验修改范围")
+            return problems
+        if empty_policy in ("warn", "outputs_only"):
+            allowed = [p for p in deliverable_paths(node) if p not in
+                       set(node.get("scope_baseline") or [])]
+            outputs = [p for p in (node.get("outputs") or []) if isinstance(p, str)]
+            if not allowed or not outputs:
+                if modified:
+                    problems.append(
+                        "节点未定义 files_scope，且没有可用的 outputs 新文件，"
+                        "无法校验修改范围"
+                    )
+                return problems
+            for item in modified:
+                try:
+                    rel = normalize_rel(item)
+                except ValueError as exc:
+                    problems.append(f"{item!r}: {exc}")
+                    continue
+                if not any(scope_match(rel, entry) for entry in allowed):
+                    problems.append(
+                        f"{rel}: 不在 files_scope 内，也不属于本节点新增的 outputs"
+                    )
+            return problems
         return problems
 
     entries = []
@@ -928,15 +1002,54 @@ def deliverable_paths(node: dict) -> list[str]:
     return paths
 
 
+CONTRACT_KINDS = ("api_contract", "db_object", "shared_config")
+
+
+def contract_bindings(node: dict) -> list[dict]:
+    """规范化后的契约绑定（只保留 kind/id/files 齐全的项）。"""
+    out: list[dict] = []
+    for entry in node.get("contract_bindings") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        cid = entry.get("id")
+        if kind not in CONTRACT_KINDS or not cid:
+            continue
+        files: list[str] = []
+        for raw in entry.get("files") or []:
+            try:
+                files.append(normalize_rel(raw))
+            except ValueError:
+                continue
+        if files:
+            out.append({"kind": kind, "id": cid, "files": files})
+    return out
+
+
 def deliverable_snapshot(paths: Paths, node: dict) -> dict:
-    """记录节点当前交付物指纹。只记真实存在的文件。"""
+    """记录节点当前交付物与契约文件指纹。只记真实存在的文件。"""
     files = {}
     for rel in deliverable_paths(node):
         fingerprint = file_fingerprint(paths.root / rel)
         if fingerprint:
             files[rel] = fingerprint
+
+    contracts: dict[str, dict] = {}
+    for binding in contract_bindings(node):
+        key = f"{binding['kind']}:{binding['id']}"
+        recorded = {
+            rel: fp
+            for rel, fp in (
+                (rel, file_fingerprint(paths.root / rel)) for rel in binding["files"]
+            )
+            if fp
+        }
+        if recorded:
+            contracts[key] = recorded
+
     return {
         "files": files,
+        "contracts": contracts,
         "plan_version": None,
         "recorded_at": now_iso(),
         "git_head": (git_snapshot(paths.root) or {}).get("head"),
@@ -983,7 +1096,95 @@ def context_changes(paths: Paths, plan: dict, node: dict) -> list[str]:
                 problems.append(f"{rel} 已不存在（{dep_id} 交付时存在）")
             elif not _same_fingerprint(recorded[rel], current):
                 problems.append(f"{rel} 在 {dep_id} 完成之后被修改过")
+
+        # 契约级：依赖声明的 API / 表结构文件变了，下游同样要重新评估
+        contracts = (dep.get("deliverables") or {}).get("contracts") or {}
+        for key, files in contracts.items():
+            for rel, fingerprint in (files or {}).items():
+                current = file_fingerprint(paths.root / rel)
+                if current is None:
+                    problems.append(f"契约 {key} 的文件 {rel} 已被删除（{dep_id} 交付时存在）")
+                elif not _same_fingerprint(fingerprint, current):
+                    problems.append(f"契约 {key} 的文件 {rel} 在 {dep_id} 完成之后被修改过")
     return problems
+
+
+# --------------------------------------------------------------------------
+# 源代码快照：回归结论必须绑定"当时那份代码"
+# --------------------------------------------------------------------------
+
+#: 计算快照时永远排除的目录（DevFlow 自己的产物 + 版本库 + 常见构建输出）
+SNAPSHOT_EXCLUDE_DIRS = {
+    ".git", ".hg", ".svn", DF_DIRNAME,
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "node_modules", ".venv", "venv", "env",
+    "dist", "build", "target", "coverage", ".next", ".nuxt",
+}
+
+
+def _snapshot_files(root: Path, extra_exclude: list[str] | None = None) -> list[str]:
+    exclude = set(SNAPSHOT_EXCLUDE_DIRS)
+    for item in extra_exclude or []:
+        try:
+            exclude.add(normalize_rel(item).split("/")[0])
+        except ValueError:
+            continue
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in exclude)
+        rel_dir = os.path.relpath(dirpath, root)
+        for name in sorted(filenames):
+            if name.endswith((".tmp", ".lock")):
+                continue
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            found.append(rel.replace("\\", "/"))
+    return found
+
+
+def source_snapshot(root: Path, extra_exclude: list[str] | None = None) -> dict:
+    """源代码快照。
+
+    Git 项目：HEAD + 未提交改动的指纹（不是只看 mtime）。
+    非 Git 项目：按文件内容哈希整棵树（同样排除 .git / .devflow / 构建产物）。
+    """
+    root = Path(root)
+    head = None
+    inner = _git(root, "rev-parse", "--is-inside-work-tree")
+    if inner and inner.strip() == "true":
+        top = _git(root, "rev-parse", "--show-toplevel")
+        if top and Path(os.path.realpath(top.strip())) == Path(os.path.realpath(str(root))):
+            head_out = _git(root, "rev-parse", "HEAD")
+            head = head_out.strip() if head_out else None
+
+    digest = hashlib.sha256()
+    count = 0
+    for rel in _snapshot_files(root, extra_exclude):
+        fingerprint = file_fingerprint(root / rel)
+        if fingerprint is None:
+            continue
+        if "sha256" in fingerprint:
+            token = fingerprint["sha256"]
+        else:
+            token = f"{fingerprint.get('size')}:{fingerprint.get('mtime')}"
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(token.encode("utf-8"))
+        digest.update(b"\n")
+        count += 1
+    dirty_digest = digest.hexdigest()
+
+    kind = "git" if head is not None else "files"
+    snapshot_id = hashlib.sha256(
+        f"{kind}:{head or '-'}:{dirty_digest}".encode("utf-8")
+    ).hexdigest()
+    return {
+        "type": kind,
+        "head": head,
+        "dirty_digest": dirty_digest,
+        "snapshot_id": snapshot_id,
+        "file_count": count,
+        "captured_at": now_iso(),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1024,6 +1225,7 @@ def prompt_binding_problems(meta: dict, project_data: dict, plan: dict, node: di
         "node_id": node["node_id"],
         "plan_version": str(plan.get("plan_version")),
         "requirement_version": str(plan.get("requirement_version")),
+        "prompt_version": str(int(node.get("prompt_version", 0) or 0)),
     }
     problems = []
     for key, value in expected.items():
@@ -1284,18 +1486,67 @@ def node_reaches(by_id: dict, start: str, target: str) -> bool:
     return False
 
 
+def _has_glob(text: str) -> bool:
+    return any(ch in text for ch in "*?")
+
+
+def _literal_prefix(pattern: str) -> list[str]:
+    """通配符之前的固定目录段。"""
+    prefix: list[str] = []
+    for seg in pattern.split("/"):
+        if _has_glob(seg):
+            break
+        prefix.append(seg)
+    return prefix
+
+
+def _pattern_matches(pattern: str, path: str) -> bool:
+    try:
+        return bool(_glob_to_regex(pattern).match(path))
+    except re.error:
+        return True  # 解析不了就按冲突处理
+
+
+def _patterns_intersect(a: str, b: str) -> bool:
+    """两个 scope 条目是否可能落到同一个文件上。
+
+    无法证明不相交就算相交——并行冲突宁可误报，也不能漏报。
+    """
+    if a == b:
+        return True
+    # 目录包含：src 与 src/api.py、src 与 src/api
+    if a.startswith(b + "/") or b.startswith(a + "/"):
+        return True
+
+    a_glob, b_glob = _has_glob(a), _has_glob(b)
+    if not a_glob and not b_glob:
+        return False
+    if a_glob and not b_glob:
+        return _pattern_matches(a, b) or _pattern_matches(a, b + "/x")
+    if b_glob and not a_glob:
+        return _pattern_matches(b, a) or _pattern_matches(b, a + "/x")
+    # 两边都是通配：固定前缀一旦分叉就一定不相交，否则保守判相交
+    pa, pb = _literal_prefix(a), _literal_prefix(b)
+    for x, y in zip(pa, pb):
+        if x != y:
+            return False
+    return True
+
+
 def scope_overlap(a: dict, b: dict) -> set[str]:
-    """两个节点 files_scope 的重叠路径（规范化后相等或互为父子目录）。"""
+    """两个节点 files_scope 的重叠项（含通配符范围）。返回命中的条目文本。"""
     out: set[str] = set()
     for x in a.get("files_scope") or []:
         for y in b.get("files_scope") or []:
+            if not isinstance(x, str) or not isinstance(y, str):
+                continue
             try:
                 nx = normalize_rel(x)
                 ny = normalize_rel(y)
             except ValueError:
                 continue
-            if nx == ny or nx.startswith(ny + "/") or ny.startswith(nx + "/"):
-                out.add(nx)
+            if _patterns_intersect(nx, ny):
+                out.add(nx if len(nx) >= len(ny) else ny)
     return out
 
 
@@ -1328,9 +1579,10 @@ def parallel_exceptions(plan: dict) -> dict[str, dict]:
 
 
 def _exception_covers(entry: dict, a: str, b: str) -> bool:
-    nodes = entry.get("nodes")
-    if not nodes:
-        return True
+    """例外必须点名节点组合，不能"一个组豁免全部冲突"。"""
+    nodes = entry.get("nodes") or []
+    if not isinstance(nodes, list) or not nodes:
+        return False
     allowed = set(nodes)
     return a in allowed and b in allowed
 
@@ -1397,7 +1649,8 @@ def parallel_issues(plan: dict, max_group_size: int = 3) -> list[dict]:
                             "severity": "error", "group": name, "nodes": [an, bn],
                             "kind": "resource_conflict",
                             "message": message
-                            + "；确认安全请加 parallel_exceptions（group + reason + approved_by）",
+                            + "；确认安全请加 parallel_exceptions"
+                            "（group + nodes + reason + approved_by，必须点名这两个节点）",
                         })
 
         statuses = {m.get("status") for m in members}
@@ -1578,6 +1831,95 @@ def _acceptance_problems(problems: list[str], node: dict, evidence: dict) -> Non
             problems.append(f"验收标准缺少证据：{criterion}")
 
 
+def normalize_criterion(text: str) -> str:
+    """验收标准归一化：去空白、全角转半角标点、大小写不敏感。"""
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", "", text).strip().lower()
+
+
+def acceptance_items(req: dict) -> list[dict]:
+    """把需求里的 acceptance 统一成 [{id, text}]，兼容旧的纯字符串格式。"""
+    items: list[dict] = []
+    for entry in req.get("acceptance") or []:
+        if isinstance(entry, str):
+            text = entry.strip()
+            if text:
+                items.append({"id": None, "text": text})
+        elif isinstance(entry, dict):
+            text = str(entry.get("criterion") or "").strip()
+            if text:
+                items.append({"id": entry.get("id"), "text": text})
+    return items
+
+
+def requirement_acceptance_problems(
+    paths: Paths,
+    node: dict,
+    evidence: dict,
+    plan: dict | None = None,
+) -> list[str]:
+    """逐条核对：节点覆盖的每条需求的每条验收标准，都要有可核查的证据。
+
+    - 证据条目必须来自本节点、且 req_id 对得上（不能借别的需求的证据）
+    - met 必须为 True
+    - evidence 必须写清测试名/命令/产物
+    """
+    node_id = node["node_id"]
+    req_ids = [r for r in (node.get("requirement_ids") or []) if isinstance(r, str)]
+    if not req_ids:
+        return []
+    trace = load_traceability(paths) or {}
+    by_req = {r.get("req_id"): r for r in trace.get("requirements", []) if r.get("req_id")}
+
+    reported = evidence.get("requirement_acceptance")
+    if not isinstance(reported, list):
+        reported = []
+    index: dict[tuple[str, str], dict] = {}
+    for entry in reported:
+        if not isinstance(entry, dict):
+            continue
+        req_id = entry.get("req_id")
+        criterion = entry.get("criterion")
+        if not isinstance(req_id, str) or not isinstance(criterion, str):
+            continue
+        index[(req_id, normalize_criterion(criterion))] = entry
+
+    problems: list[str] = []
+    for req_id in req_ids:
+        req = by_req.get(req_id)
+        if req is None:
+            continue  # 追踪表缺失由 validate 单独报
+        items = acceptance_items(req)
+        if not items:
+            problems.append(f"{node_id} 覆盖的 {req_id} 没有验收标准，无法证明需求被验证")
+            continue
+        for item in items:
+            key = (req_id, normalize_criterion(item["text"]))
+            entry = index.get(key)
+            if entry is None and item["id"]:
+                # 允许用稳定 id 对应（criterion 文本易改，id 更可靠）
+                entry = next(
+                    (
+                        e for e in reported
+                        if isinstance(e, dict)
+                        and e.get("req_id") == req_id
+                        and e.get("criterion_id") == item["id"]
+                    ),
+                    None,
+                )
+            if entry is None:
+                problems.append(
+                    f"{node_id}: 缺少 {req_id} 验收项的证据 —— {item['text']}"
+                )
+                continue
+            if entry.get("met") is not True:
+                problems.append(f"{node_id}: {req_id} 验收项未满足 —— {item['text']}")
+            if not str(entry.get("evidence") or "").strip():
+                problems.append(f"{node_id}: {req_id} 验收项没有写证据 —— {item['text']}")
+    return problems
+
+
 def _command_problems(problems: list[str], node_id: str, report: dict) -> None:
     commands = report.get("commands")
     if not isinstance(commands, list) or not commands:
@@ -1622,6 +1964,11 @@ def _summary_problems(problems: list[str], node_id: str, report: dict, gates: di
 
     cases = report.get("cases")
     if not isinstance(cases, list) or not cases:
+        if strict and gates.get("require_case_details", True):
+            problems.append(
+                f"{node_id} 测试报告没有 cases 用例明细；新执行必须逐条列出"
+                "（确实没有测试就用 no_test 流程）"
+            )
         return
     counts = {"pass": 0, "fail": 0, "skip": 0}
     for case in cases:
@@ -1690,8 +2037,19 @@ def evidence_problems(
                 _binding_problems(problems, "执行报告", evidence, node, plan)
                 if gates.get("require_acceptance_evidence", True) and strict:
                     _acceptance_problems(problems, node, evidence)
+                if gates.get("require_requirement_evidence", True) and strict:
+                    problems.extend(
+                        requirement_acceptance_problems(paths, node, evidence, plan)
+                    )
                 modified = evidence.get("modified_files")
-                if modified is not None and not isinstance(modified, list):
+                if modified is None:
+                    # 不允许"没写 = 没改"：这会直接绕过 files_scope
+                    if strict:
+                        problems.append(
+                            f"{node_id} 执行报告缺少 modified_files；新执行必须显式声明"
+                            "（没有改动写空数组 []）"
+                        )
+                elif not isinstance(modified, list):
                     problems.append(f"{node_id} 执行报告的 modified_files 必须是数组")
 
     # ---- 无测试节点 ----

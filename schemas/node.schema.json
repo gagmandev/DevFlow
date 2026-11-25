@@ -121,6 +121,20 @@
       "minimum": 0,
       "description": "提示词版本；每次 prompt-init 递增"
     },
+    "contract_bindings": {
+      "type": "array",
+      "description": "契约文件绑定：把 api_contracts / db_objects 落到可核查的文件路径上",
+      "items": {
+        "type": "object",
+        "required": ["kind", "id", "files"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["api_contract", "db_object", "shared_config"] },
+          "id": { "type": "string", "minLength": 1 },
+          "files": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
     "deliverables": {
       "type": ["object", "null"],
       "description": "accept 时记录的交付物指纹；下游用它判断依赖产物是否被改过",
@@ -135,6 +149,22 @@
               "mtime": { "type": "integer" }
             },
             "additionalProperties": false
+          }
+        },
+        "contracts": {
+          "type": "object",
+          "description": "契约键（kind:id）到文件指纹的映射",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "sha256": { "type": "string" },
+                "size": { "type": "integer" },
+                "mtime": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
           }
         },
         "plan_version": { "type": ["integer", "null"] },
@@ -166,6 +196,15 @@
         "captured_at": { "type": "string" }
       },
       "additionalProperties": false
+    },
+    "git_unavailable": {
+      "type": "boolean",
+      "description": "sync 时无法计算 Git 变更（非仓库/非仓库根）"
+    },
+    "scope_baseline": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "start 时已存在的交付物；空 files_scope 时判断哪些是本轮新增文件"
     },
     "git_actual_changes": {
       "type": "array",
