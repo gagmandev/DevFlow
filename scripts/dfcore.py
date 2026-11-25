@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 DF_DIRNAME = ".devflow"
 
 PROJECT_STATUSES = [
