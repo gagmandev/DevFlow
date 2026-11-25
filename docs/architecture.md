@@ -98,7 +98,10 @@ pending → ready → in_progress → needs_review → completed
 | 用旧报告冒充本轮 | `attempt_id` 绑定到执行尝试 |
 | 越界修改 | `files_scope` 规范化匹配，越界进 `scope_violations`，验收阻断 |
 | 历史被覆盖 | 版本化文件 + 返工前归档到 `history/` |
-| 报告被当成交付 | 三段式状态：candidate → ready → accepted |
+| 报告被当成交付 | 三段式状态：candidate → ready → accepted，`accepted` 是终态 |
+| 并行组靠"同层"猜 | `dfcore.parallel_issues` 统一判定依赖可达性与资源冲突 |
+| 上游产物改了、下游照旧开工 | `accept` 记交付物指纹，`start` 比对声明的 `inputs` |
+| 文档和代码漂移 | `tests/test_docs_consistency.py` + `df.py self-test` |
 
 ## 八、扩展点
 

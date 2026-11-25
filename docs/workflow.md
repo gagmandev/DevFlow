@@ -60,7 +60,7 @@ start（检查依赖）
   → 实现 → 写测试 → 跑测试
   → 失败则修（最多 2 轮）
   → 写 execution-report.md + test-report.json
-  → sync（读证据，转 needs_review 或 failed）
+  → sync（读证据，转 needs_review 或 failed；只接受 in_progress）
   → accept（证据齐全 → completed，自动解锁下游）
 ```
 
@@ -70,6 +70,9 @@ start（检查依赖）
 同组冲突（间接依赖、文件/表/接口/配置撞车）会被校验器阻断，例外要写 `parallel_exceptions`。
 
 外部 Agent 的报告用 `sync <ID> --external --from <目录>` 导入，仍走同一套校验。
+
+`start` 前会比对依赖交付物指纹：`accept` 时记下的文件若在本节点 `inputs` 里且被改过，
+会要求先评估影响（`--ack-context --reason` 留档）。
 
 ### 阶段 5 · 变更（change）
 
