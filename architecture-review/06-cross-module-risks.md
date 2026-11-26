@@ -49,6 +49,61 @@
 - **影响**：拒绝原因丢失，审计链断裂。
 - **级别**：P2
 
+### A6 `release_ready` 后改写需求追踪表，缩小交付范围（P0，本轮新增）
+
+**结论：可以绕过需求确认与 CR。** 这是一条完整的"交付前改口径"通道。
+
+**链路（逐步对应代码）**：
+
+| 步 | 动作 | 代码事实 |
+| --- | --- | --- |
+| 1 | 项目处于 `release_ready` | 状态由 `release-ready` 设置（`df.py:2594`） |
+| 2 | `req-import` 仍可执行 | `cmd_req_import`（`df.py:399`）**没有项目状态前置**；`main()` 只在 `accepted` 时拦（`df.py:3563`） |
+| 3 | 导入同版本追踪表，把 active 需求改成 `removed/deferred/out_of_scope` | `df.py:423` 直接覆盖 `traceability-vN.json` + `traceability.json`，无 `--force`、无归档、无版本单调性检查 |
+| 4 | Schema 不强制退役凭据 | `schemas/requirements.schema.json` 的 `required` 只有 `req_id/title/category/status`；`reason/confirmed_by/superseded_by` 均为可选 |
+| 5 | 旧回归只绑定 `requirement_version` | `_regression_data_problems` 比对的是数字（`df.py:2100-2105`）；报告里没有需求内容 digest |
+| 6 | `delivery_blockers` 跳过非 active 需求 | `df.py:2231-2232`：`if req.get("status") != "active": continue` |
+| 7 | `release-accept` 的门禁不重校验退役凭据 | `cmd_release_accept`（`df.py:2602`）只调 `delivery_gate_problems` → `delivery_blockers` + `release_report_problems`；两者都不调 `validate_all`、不调 `requirement_retirement_problems` |
+
+**复现步骤（静态推导，本轮未执行）**：
+
+1. 准备一个所有节点 `completed`、回归 `passed`、已 `release_ready` 的项目。
+2. 复制 `traceability-vN.json`，把 `REQ-002.status` 从 `active` 改成 `removed`（**不写** `reason`/`confirmed_by`），`acceptance` 保持原样。
+3. `df.py req-import --file 新表.json --version N`（版本不变）。
+4. `df.py release-accept --by "reviewer"`。
+
+**为什么第 4 步会通过**：
+
+- 节点证据校验 `evidence_problems` 仍会跑（`delivery_blockers` 第一个循环），但它校验的是**节点引用的需求验收标准**；
+  `REQ-002` 只是状态变了、`acceptance` 没变，`requirement_acceptance_problems` 仍能匹配到证据 → 不报错。
+- 需求覆盖检查只遍历 active（第 6 步）→ `REQ-002` 被跳过。
+- 回归报告仍声称 `requirement_version=N`（第 5 步）→ 版本一致。
+- 退役凭据只在 `validate` / `regression-check` 检查（`validate.py:297`、`df.py:1931`），而这两个命令**不在交付路径上**。
+
+**影响**：交付范围可以事后缩小 —— 例如把"必须冻结积分"这条需求标成 `removed`，交付报告里就不会再有它，
+用户验收时看到的是"全部通过"。这不是"改代码"，只需要一次 `req-import`，没有 CR、没有用户确认。
+
+**直接结论**：
+
+- 能否绕过需求确认？**能**（`req-import` 不检查是否已 `req-confirm`、不检查项目状态）。
+- 能否绕过 CR？**能**（需求状态变更没有任何 CR 绑定）。
+- 现有 `requirement_retirement_problems` 只在两个"事后检查"入口调用，**不构成全流程强制**。
+
+**级别**：P0。对应不变量 INV-005 / INV-024 / INV-029。
+
+### A7 `planned` 状态下 `req-confirm` 会回退状态并改版本指针（P0，本轮新增）
+
+- **现象**：`req-confirm` 只在 `in_progress/regression/release_candidate/release_ready` 拒绝，
+  **没有排除 `planned`**（`df.py:434-437`），执行后无条件把 `status` 置回 `requirements_confirmed`
+  （`df.py:466-467`），并写 `current_requirement_version`。
+- **影响**：
+  1. 已激活计划的项目可以退回"需求确认"，等同绕过状态机；
+  2. 可以把 `current_requirement_version` 指向另一个版本，而 `backlog-vN.json.requirement_version` 不变 →
+     计划/需求指针分叉；`validate` 只检查计划引用的基准文件存在，不检查指针相等（`validate.py:299-304`）。
+- **复现思路（静态推导，未执行）**：`plan-activate` 后执行 `req-confirm --version 2` → 项目状态回
+  `requirements_confirmed`，`project.current_requirement_version=2`，计划仍引用 v1。
+- **级别**：P0（状态回退 + 指针分叉）；对应 INV-003 / INV-015。
+
 ## B. Git 与 Agent
 
 ### B1 baseline 就 dirty 的文件被整份剔除（P0）
@@ -156,7 +211,11 @@
 ### D5 交付门禁的"证据真实性"上限（P0，设计性）
 
 - 见 INV-023。当前所有证据都是 Agent 自述 + 自洽校验；`source_snapshot` 只能证明"代码没变"，不能证明
-  "命令真的跑过"。这是架构层面的硬限制，需要产品决策（是否接受"自证 + 抽查"）。
+  "命令真的跑过"。
+- **已定（D-05）**：Agent 自报只作为过程记录，不具备独立验收权；生产关键回归必须使用**可核验的 CI 结果**，
+  并绑定 commit SHA 与需求 digest。
+- **必须明确的信任边界**：SHA-256 只能证明"文件内容与摘要一致"，**不能证明执行过程真实**；
+  若 CI 结果本身由被审计方提供且无外部锚点，同样不可信。
 
 ## E. 并发与事务
 
@@ -205,7 +264,7 @@
 
 | 级别 | 数量 | 编号 |
 | --- | --- | --- |
-| P0 | 6 | A1 A2 B1 C1 D1 D5 |
+| P0 | 8 | A1 A2 A6 A7 B1 C1 D1 D5 |
 | P1 | 8 | A3 A4 B2 B3 C2 D2 E1 F1 |
 | P2 | 11 | A5 B4 C3 C4 C5 D3 D4 E2 E3 F2 F3 |
-| 合计 | 25 | （B5 为"已覆盖"，不计入） |
+| 合计 | 27 | （B5 为"已覆盖"，不计入） |

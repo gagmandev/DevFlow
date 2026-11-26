@@ -17,6 +17,10 @@
 | CR 与计划严格绑定 | `df.py:1664-1689` | `test_v14_gates.py:288 ChangeBindingTest` | `references/change-management.md` |
 | CR 基准过期拒绝 | `df.py:1640-1660` | `test_p1_workflow.py:856 ChangeBaseVersionTest` | 同上 |
 | 无 CR 换计划的缺口 | `df.py:522`、`validate.py:516-523`、`df.py:587` | **无**（本次新增结论） | 本文档 03 节 B2 |
+| ready 后改需求缩小交付范围 | `df.py:399`（无状态门槛）、`df.py:2231-2232`（跳过非 active）、`df.py:2565/2602`（交付不重校验） | **无** | 06 节 A6、05 节 INV-029 |
+| `planned` 下 req-confirm 回退状态 | `df.py:434-437`、`df.py:466-467` | **无** | 06 节 A7、03 节 B10 |
+| 退役凭据的实际调用点 | `validate.py:297`、`df.py:1931`（仅两处） | `RegressionCoverageTest` | 05 节 INV-005 |
+| 事务实际使用点 | 仅 `df.py:1706`（`change-apply`） | `TransactionTest`（只测事务对象） | 02 节 §四 |
 | DAG 检环/依赖校验 | `dfcore.py:1390 find_cycles`、`validate.py:437-460` | `test_devflow.py:243 GraphTest` | `references/task-decomposition.md` |
 | 并行冲突判定（含通配符） | `dfcore.py:1629 parallel_issues`、`dfcore.py:1575 scope_overlap` | `test_v14_gates.py:200 WildcardScopeTest`、`test_p1_workflow.py:629` | `references/dependency-management.md` |
 | 并行例外需点名节点 | `dfcore.py:1620 _exception_covers`、`schemas/backlog.schema.json` | `test_v14_gates.py`（组级豁免被拒） | `SKILL.md` 7.1 |
@@ -54,6 +58,8 @@
 | 证据真实 | `SKILL.md` "实际跑测试并留下证据" | 只能校验自洽；无法证明执行 |
 | `rejected` CR 有原因 | `schemas/change.schema.json` 允许 `rejected` | 无 reason/confirmed_by 要求 |
 | 并行安全 | `SKILL.md` 7.1 | `parallel_issues` 已实现，但"多 Agent 共享工作区"时变更归属不可靠 |
+| "release_candidate = 具备候选资格" | `SKILL.md` 14 | `release` 在 blockers 非空时也置该状态（`df.py:2435`），语义混合；按 D-06 需拆分 |
+| "证据可验收" | `SKILL.md` 10 | Agent 自写报告只能校验自洽；按 D-05 生产应以 CI 结果为准 |
 
 ## 三、代码存在但缺乏有效测试
 
@@ -83,9 +89,13 @@
 | INV-016 | `df.py:78` | `AcceptedGuardTest` |
 | INV-019 | `dfcore.py:1183` | `SourceSnapshotTest` |
 | INV-021 | `df.py:2018` | `RegressionJsonTest` |
-| INV-024 | `df.py:2208/2484` | `ReleaseGateTest` |
+| INV-024 | `df.py:2208/2484`（**部分**：不重校验需求基线） | `ReleaseGateTest`、`ReleaseStateTest` |
 | INV-027 | 多处 | `EvidenceStrictTest`、`ReleaseGateTest` |
+| INV-029 | **无强制点**（`release-ready/accept` 不调 `validate_all`、不查退役凭据） | **无** |
 | INV-002/003/008/015/023 | **无强制点** | **无** |
+
+> 判定方法：**不只看函数是否存在**，还要看它被哪些入口调用。完整调用矩阵见
+> `05-system-invariants.md` 的 INV-005 / INV-017 / INV-024 / INV-029 行。
 
 ## 五、文档间引用关系
 

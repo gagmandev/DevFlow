@@ -63,16 +63,29 @@ erDiagram
 | `snapshot_id` | 回归报告 + `source-snapshot.json` | 交付 | `snapshot_problems`（`df.py:1844`） |
 | CR `change_id` | 目录 + JSON + 计划 `based_on` | `change-apply` | `df.py:1665-1685` |
 
-## 四、必须原子一致的数据组
+## 四、必须原子一致的数据组（逐组核对写盘调用）
 
-| 组 | 文件 | 现状 |
-| --- | --- | --- |
-| G1 计划生效 | `backlog-vNew.json`(active) + `backlog-vOld.json`(superseded) + `project.current_plan_version` + `board-vNew.md` | ✅ 走 `Transaction`（`df.py:1706-1714`） |
-| G2 需求导入 | `traceability-vN.json` + `traceability.json` | ❌ 两次 `atomic_write_json`，无事务（`df.py:423-426`）；第二次失败则指针与版本文件不一致 |
-| G3 节点验收 | `backlog-vN.json`(node.completed) + `board-vN.md` + node.deliverables | ❌ 失败路径用 `save_plan` 不重渲染看板（`df.py:1366`）；成功路径 `refresh` 才渲染 |
-| G4 交付候选 | `release-report.md` + `release-report.json` + `project.status=release_candidate` | ❌ 三次写，非事务（`df.py:2419-2437`） |
-| G5 回归导入 | `final-report.json` + `final-report.md` + `project.status` | ❌ 非事务（`df.py:1866-1898` 区间） |
-| G6 节点开工 | `backlog`(in_progress/attempt_id) + `board` | ✅ `refresh` 内先存计划再渲染（`df.py:152-158`） |
+> 口径：**原子** = 同一组文件要么全部生效、要么全部可回滚（`Transaction`）。
+> 只调用 `atomic_write_json` 是"单文件原子"，**不是**"数据组原子"。
+> 本轮逐组核对了实际写盘调用，修正了上一版把 `change-apply` 的事务误记为 `plan-activate` 的错误。
+
+| 组 | 涉及文件 | 写盘调用（准确到函数） | 是否有事务 | 中断后果 |
+| --- | --- | --- | --- | --- |
+| G1 计划生效（变更流程） | `backlog-vNew.json` → active；`backlog-vOld.json` → superseded；`project.json`；`board-vNew.md` | `cmd_change_apply`：`core.Transaction`（`df.py:1706-1714`）→ 逐 phase 写（`df.py:1717-1750`） | ✅ **唯一使用事务的地方** | 回滚到应用前（`recover --apply`） |
+| G2 计划激活（普通流程） | 旧计划 superseded；新计划 active；`project.json`（`current_plan_version` + `status=planned`）；`board` | `cmd_plan_activate`：三次 `atomic_write_json`/`project.save` + `refresh()`（`df.py:610-632`） | ❌ 无事务 | 可能"旧计划已 superseded、新计划未 active"或"计划 active、project 未更新"；`doctor` 能发现部分（多 active / 指针无文件），需人工修 |
+| G3 需求导入 | `requirements/traceability-vN.json` + `requirements/traceability.json` | `cmd_req_import`：两次 `atomic_write_json`（`df.py:422-426`） | ❌ 无事务 | 指针与版本文件不一致；无校验能发现 |
+| G4 节点验收（成功） | `backlog-vN.json`（node→completed + deliverables）；`board-vN.md` | `cmd_accept`：`transition()` 改内存 → `refresh()`（`save_plan` + 渲染，`df.py:152-158`） | ❌ 无事务（两次单文件原子写） | 计划已更新、看板未更新（状态仍可从 JSON 恢复） |
+| G4' 节点验收（拒绝） | `backlog-vN.json`（实时 `scope_violations` / `git_*`） | `cmd_accept` 拒绝前 `project.save_plan(plan)`（`df.py:1366`） | ❌ 单文件写 | 只落盘证据性字段，状态不变 |
+| G5 节点开工 / 同步 | `backlog-vN.json`（in_progress/attempt_id 或 needs_review） + `board-vN.md` | `cmd_start` / `cmd_sync` → `transition()` + `refresh()` | ❌ 无事务 | 计划已变、看板未变 |
+| G6 回归导入 | `regression/final-report.json` + `regression/final-report.md`（+ 旧报告移入 `history/`） | `cmd_regression_import`：`_archive_regression()`（`df.py:1819-1840`）+ 两次写（`df.py:1866-1880`） | ❌ 无事务；**不改 `project.json`**（状态由 `regression-check` 设置） | 可能出现 JSON 已换、Markdown 仍旧 |
+| G7 交付报告 | `releases/release-report.md`（旧版复制到 `history/`）+ `releases/release-report.json` + `project.json`（status=`release_candidate`） | `cmd_release`：`shutil.copy2` → `atomic_write_text` → `atomic_write_json` → `project.save`（`df.py:2409-2437`） | ❌ 无事务，共 4 次写 | 报告与元信息/状态可能不一致 |
+| G8 交付验收 | `project.json`（status=`release_ready` / `accepted` + 时间戳/验收人） | `cmd_release_ready` / `cmd_release_accept`：单次 `project.save` | ✅ 单文件写（无需事务） | — |
+
+**结论修正**：
+
+* 上一版把 `plan-activate` 也标为"走 Transaction"是**错误**的；事务只存在于 `change-apply`。
+* 只有 G8 是天然原子的（单文件）；G1 是唯一"多文件 + 事务"；其余 6 组都是"多次单文件原子写"，
+  中断后需要人工/`doctor` 发现，没有自动回滚协议。
 
 ## 五、失效关系（谁变了，谁必须失效）
 
@@ -80,7 +93,8 @@ erDiagram
 | --- | --- | --- |
 | 源代码变化 | 回归结论、交付报告 | ✅ `snapshot_problems`（`df.py:1844`，仅比对回归报告记录的快照） |
 | 计划内容/版本变化 | 旧提示词、旧回归、旧交付报告 | 部分：提示词 ✅（`prompt_binding_problems`）；回归 ✅（版本比对）；交付报告 ✅（`release_report_problems` 比对版本） |
-| 需求内容变化（同版本） | 回归、交付、节点证据 | ❌ 无内容指纹，只在版本号变化时失效（见 INV-019） |
+| 需求内容变化（同版本） | 回归、交付、节点证据 | ❌ 无内容指纹，只在版本号变化时失效（见 INV-020） |
+| 需求被标成 `deferred/removed/out_of_scope`（同版本） | 交付门禁对该需求的检查 | ❌ `delivery_blockers` 直接跳过非 active 需求（`df.py:2231-2232`），退役凭据也不在交付阶段校验（见 A6） |
 | 节点验收后交付物被改 | 下游 `start` 需重新评估 | ✅ `context_changes`（`dfcore.py:1106`） |
 | 契约文件被改 | 下游 `start` 需重新评估 | ✅ 同上（`deliverables.contracts`） |
 | 看板被手改 | 无 | ❌ 无哈希校验，只能靠重渲染覆盖 |
@@ -129,9 +143,22 @@ erDiagram
 - 因为状态未变（仍是 `needs_review`），看板语义上不错误；但 `scope_violations` 等字段不会出现在看板上，
   用户从看板看不出"验收被拦了"。**P2**
 
+### R7 `release_ready` 之后仍可改写需求追踪表（P0）
+
+- **写入路径**：`cmd_req_import`（`df.py:399`）没有项目状态前置，只有 accepted 被 `main()` 白名单挡住；
+  `release_ready` / `release_candidate` 下都可以导入。
+- **影响**：导入同版本追踪表、把某条 active 需求改成 `removed`（不写 `reason`/`confirmed_by`），
+  交付门禁会**跳过**该需求（`df.py:2231-2232`），而 `release-ready` / `release-accept` 都**不**重新跑
+  `validate_all`、也**不**检查退役凭据（`cmd_release_ready` `df.py:2565`、`cmd_release_accept` `df.py:2602`）。
+- **与 R2 的区别**：R2 是"改内容不改版本"；R7 是"改状态让需求退出交付范围"，两件事都不需要 CR。
+- **完整链路与复现步骤**见 `06-cross-module-risks.md` A6。
+
 ## 七、数据模型层面的结论
 
 1. 事实来源划分总体清晰：状态在 JSON、展示在 Markdown、证据在节点目录。
 2. 但存在 **两类"第二事实来源"**：`traceability.json` 与需求基准 Markdown，二者都缺少防漂移机制。
 3. 所有"版本一致性"校验都基于**版本号**，没有基于**内容指纹**；因此"同版本改内容"是系统性盲区。
-4. 原子性只覆盖计划生效（G1），其余多文件写入（G2/G4/G5）依赖"两次原子写"，中断后会留下不一致。
+4. 原子性**只覆盖变更流程的 `change-apply`（G1）**；`plan-activate` 虽然同样改三四个文件，
+   但**没有事务**。其余 G2/G3/G4/G5/G6/G7 都是"多次单文件原子写"，中断后会留下不一致。
+5. 需求侧还有一条独立通道：`req-import` 可在任意非 accepted 状态改写追踪表（含 `release_ready`），
+   而交付门禁跳过非 active 需求 —— 数据模型上"需求是否在范围内"没有一个不可事后修改的锚点（R7 / A6）。

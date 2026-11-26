@@ -111,3 +111,18 @@ DevFlow 是一个**纯文件 + Python CLI 的状态机**：没有数据库、没
 
 > 详细的数据关系见 `02-data-model.md`，状态机见 `03-lifecycle-and-state-machines.md`，
 > 权限矩阵见 `04-permission-boundaries.md`。
+
+## 六、审查修订补充（第二轮独立审查）
+
+第一轮遗漏了"需求侧"的一条完整通道，已在 02/03/05/06 中补齐，这里给出索引：
+
+- **`req-import` 没有项目状态门槛**（`df.py:399`）：除 `accepted` 外任何状态都能改写追踪表；
+  配合 `delivery_blockers` 跳过非 active 需求（`df.py:2231-2232`），可在 `release_ready` 后缩小交付范围（A6）。
+- **`req-confirm` 未排除 `planned`**（`df.py:434-437`）：会把项目状态回退到 `requirements_confirmed`
+  并改写需求版本指针（A7）。
+- **交付阶段不重校验需求基线**：`release-ready`/`release-accept` 只跑 `delivery_blockers` +
+  `release_report_problems`，不调用 `validate_all`、不检查退役凭据（INV-029）。
+- **事务只存在于 `change-apply`**：`plan-activate` 没有事务（修正 02 的 G1 描述）。
+
+> 这三条不改变本文的模块划分，但改变了"权限边界"与"不变量"的结论，
+> 以 `04`/`05`/`06` 的修订版为准。

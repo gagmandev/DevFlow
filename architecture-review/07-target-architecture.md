@@ -24,23 +24,28 @@
 ### C1 计划版本变更必须可追溯（对应 INV-008）
 
 - **现状**：`plan-import` 允许 `based_on` 为空；`plan-activate` 不校验来源。
-- **目标**：
+- **目标**（D-01）：
   - `plan_version == 1`：允许无 `based_on`（首次）。
   - `plan_version > 1`：`based_on.change_id` 必填，且该 CR 必须 `confirmed`；
     `plan-activate` 校验 CR 存在且 `target_plan_version == version`。
-  - 提供显式逃生口 `plan-import --replan --reason "..."`：写入 `based_on.kind="replan"` + 责任人，
-    仍产生审计记录（但不是 CR）。
-- **代价**：低（校验 + schema 字段）。**收益**：堵住当前最大绕过。
+  - **不设 `--replan` 之类的独立通道**：影响交付基准的计划修改只能走 CR。
+  - 纯执行元数据（`owner`/`remark`/`stats_note`）允许就地修改，但写审计记录。
+  - 历史项目里无 `based_on` 的 v>1 计划：`migrate` 标 `legacy_plan_origin`，只读保留、不可再激活。
+- **代价**：低（校验 + schema 字段 + migrate 标记）。**收益**：堵住当前最大绕过。
 
 ### C2 需求基准内容指纹（INV-002 / INV-020）
 
-- **现状**：只校验存在/长度。
-- **目标**：`req-confirm` 计算 `sha256(confirmed-requirements-vN.md)` 写入
-  `project.requirement_baseline = {version, file, sha256, confirmed_by, at}`；
-  - `regression-import` 把 `requirement_digest` 写进报告；
-  - `release-ready`/`release-accept` 重算 digest，不一致即"需求基准已变更，需重跑回归"；
-  - 变更需求必须走 CR 生成 v(N+1)，旧 digest 自然失效。
-- **代价**：低。**收益**：把"改文档不改版本"这条暗路封死。
+- **现状**：只校验存在/长度；`req-import` 可在任意状态改写追踪表。
+- **目标**（D-02，CLI 生成、双 digest + 版本清单）：
+  - `req-confirm` 计算 `traceability_digest`（结构化数组规范化哈希）与
+    `confirmed_doc_digest`（文档全文哈希），合成 `baseline_id`；
+  - 写入 `project.requirement_baseline`，并**追加**到 `requirements/baselines.json`（不可覆盖）；
+  - 计划 / CR / 回归报告 / 交付报告元信息都写 `requirement_baseline_id`；
+  - `regression-import`、`release-ready`、`release-accept` 重算并逐项比对；
+  - `req-import` 增加状态门槛与版本单调性校验（禁止在 `release_candidate`/`release_ready` 改写；
+    同版本重导需 `--force` + 归档）。
+- **代价**：中（新增字段 + 清单文件 + 多处比对 + 迁移）。**收益**：堵住"改文档/改状态不改版本"两条暗路。
+- **边界**：digest 只证明内容一致，不证明确认者身份（见 D-02 / D-05）。
 
 ### C3 traceability 单一事实 + 指针校验（INV-003 / INV-018）
 
@@ -62,39 +67,46 @@
 
 ### C5 ignored 文件策略（INV-011）
 
-- **目标**：配置 `git.ignored_policy`：
-  - `deny`（production 默认）：`git status --ignored --porcelain` 里出现**新增/修改**的 ignored 文件即阻断，
-    除非在 `node.ignored_allowlist` 显式声明（写清原因）；
-  - `allowlist`：只允许白名单目录（如 `dist/`）；
-  - `off`：不管（development）。
+- **状态：待定（D-04）**。三种方案（`allowlist` / `deny` / `off`）需要产品确认生产项目是否允许
+  交付依赖 ignored 配置；未定期间实现保持现状（不检测），但交付报告必须声明"ignored 文件未纳入范围校验"。
+- **候选实现**：`git.ignored_policy` 配置 + `node.ignored_allowlist`；`allowlist` 默认只允许构建产物目录。
 - **代价**：中（要处理 ignored 目录噪音）。**收益**：补上 `.env`/构建产物这类盲区。
+- **注意**：这是 D-03/09 之外的另一条"真实变更"缺口，不能因为 worktree 落地就认为已解决。
 
 ### C6 项目状态迁移表（INV-015）
 
 - **目标**：`PROJECT_TRANSITIONS`，与节点表同构：
 
-  | from | 允许 to |
-  | --- | --- |
-  | initialized | requirements_confirmed |
-  | requirements_confirmed | planned, requirements_confirmed |
-  | planned | in_progress, planned |
-  | in_progress | regression, in_progress |
-  | regression | release_candidate, in_progress（节点返工） |
-  | release_candidate | release_ready, regression（重跑） |
-  | release_ready | accepted, release_candidate（复核失败回退） |
-  | accepted | in_progress（仅 change-apply） |
+  | from | 允许 to | 触发 |
+  | --- | --- | --- |
+  | initialized | requirements_confirmed | `req-confirm` |
+  | requirements_confirmed | planned | `plan-activate` |
+  | planned | in_progress | `start` |
+  | in_progress | regression | `regression-check`（无阻塞） |
+  | regression | release_candidate | `release`（**全部门禁满足**，D-06） |
+  | release_candidate | release_ready | `release-ready` |
+  | release_ready | accepted | `release-accept --by` |
+  | accepted | in_progress | `change-apply`（唯一出口） |
+
+  **显式禁止**（目标）：
+  - `planned/release_candidate → requirements_confirmed`（`req-confirm` 在已激活计划后应拒绝）；
+  - `regression/release_candidate → planned`（换计划必须走 CR，且只能由 `change-apply` 回 `in_progress`）；
+  - `release` 失败时改状态（D-06：保持原状态，只在报告中记 `blockers`）。
 
   - 所有写入改走 `dfstate.set_project_status(project, to, cause)`；表外迁移直接抛错。
-  - `release` 在 blockers 非空时**不再**改状态（或改为 `release_generated` 中间态，见 D-06）。
+  - `release` 全部门禁满足才置 `release_candidate`；失败保持原状态。
 - **代价**：中（要改 8 处调用点 + 测试）。**收益**：消灭跳阶/回退。
 
 ### C7 多文件写统一事务（INV-017）
 
-- **目标**：把 `Transaction` 提升为 `apply_multi(paths, name, files, mutate)`：
-  - `req-import`（traceability-vN + 指针）
-  - `release`（md + json + project）
-  - `regression-import`（json + md + project）
+- **现状（已核实）**：只有 `change-apply` 使用 `Transaction`；`plan-activate`、`req-import`、
+  `release`、`regression-import`、`accept/sync/start` 都是"多次单文件原子写"（见 02 §四）。
+- **目标**：把 `Transaction` 提升为 `apply_multi(paths, name, files, mutate)`，覆盖：
   - `plan-activate`（旧计划 + 新计划 + project + board）
+  - `req-import`（traceability-vN + 指针）
+  - `release`（md + json + project 状态）
+  - `regression-import`（json + md + 归档）
+  - `accept`（计划 + 看板 + deliverables）
 - **代价**：中（要保证每个 mutate 幂等）。**收益**：中断不再留下"半套状态"。
 
 ### C8 报告完整性指纹（INV-018 / D3）
@@ -108,16 +120,18 @@
 
 ### C9 证据可信度分层（INV-023）
 
-无法做到"证明命令真跑过"，但可以分层降低伪造收益：
+按 **D-05** 分层，Agent 自报降级为"过程记录"：
 
-| 层 | 机制 | 成本 |
+| 层 | 机制 | 是否可作验收依据 |
 | --- | --- | --- |
-| L1（现有） | 报告自洽、`attempt_id`、统计一致 | 0 |
-| L2（建议） | `commands[]` 记录 `stdout_sha256` + 耗时 + 环境（OS/Python 版本） | 低 |
-| L3（建议，可选） | `test-report.json` 由测试运行器直接产出（提供 `df.py record-test --cmd ...` 包装） | 中 |
-| L4（流程） | 抽检：交付前人工重跑 1-2 条命令 | 人力 |
+| L0（现有） | 报告自洽、`attempt_id`、统计一致 | ❌ 仅过程记录 |
+| L1（生产门槛） | **CI 结果**：绑定 `commit_sha` + `baseline_id` + run id + 退出码 | ✅ 生产项目必须 |
+| L2（可选增强） | `commands[]` 记 `stdout_sha256` / 耗时 / 环境（OS/Python） | 仅提高伪造成本 |
+| L3（流程） | 交付前人工抽检 1-2 条命令 | 辅助 |
 
-> 目标不是"不可伪造"，而是"伪造需要付出与真实执行相近的成本"。
+> 必须写清：SHA-256 与 CI 报告只证明"结果对应这个 commit 与这份需求基线"，
+> **不证明执行过程真实**；若 CI 结果由被审计方自行产出且无外部锚点，仍是"自报的升级版"。
+> 不把"内容指纹"当成"执行真实性"的证明。
 
 ### C10 证据/报告的写入边界（INV-016 延伸）
 
@@ -131,15 +145,29 @@
 
 ## 三、并行与隔离
 
-| 场景 | 当前是否允许 | 目标 |
+| 场景 | 当前 | 目标（D-03 / D-09） |
 | --- | --- | --- |
 | 同组节点、`files_scope` 不重叠、无依赖 | 允许（`parallel_issues` 校验） | 保留；补"资源别名"识别 |
-| 同组节点共享工作区 | 允许（靠 Git 差集归属） | **建议要求 worktree 隔离**，否则验收时把并行改动算到彼此头上 |
+| **生产**环境同组并行 | 允许，但共享工作区 | **必须**每节点独立 worktree（或等效隔离）；`isolation` 未声明时 `plan-activate` 拒绝 |
+| development 同组并行 | 共享工作区 | 允许，但必须在看板/报告标注"非隔离并行" |
 | 跨组/跨阶段并行 | 不允许（依赖未完成不能 start） | 保留 |
-| 执行 Agent 与主控同时写 `.devflow` | 锁保证互斥 | 保留；补"报告 sha 校验" |
+| 执行 Agent 与主控同时写 `.devflow` | 锁保证互斥 | 保留；补"报告 sha 校验"（C8） |
 
-> 若短期不做 worktree：至少在 `accept` 输出里区分 `attributed_to_this_node` 与 `workspace_other_changes`，
-> 并要求主控对后者显式确认（类似 `--allow-scope`）。
+> **不再提供"共享工作区靠 Git 差集归属"作为生产默认**：归属不可靠（见 06 B3），
+> 只在 development 档位保留，并明确标注。worktree 尚未实现前，生产并行只能串行。
+
+## 四、不变量 → 目标强制点（实施顺序建议）
+
+| 优先级 | 不变量 | 目标机制 | 依赖 |
+| --- | --- | --- | --- |
+| 1 | INV-008 | C1 计划来源校验（无 `--replan` 旁路） | 无 |
+| 2 | INV-015 | C6 项目迁移表（含 D-06 语义） | 无 |
+| 3 | INV-002/003/020 | C2 需求双 digest + baselines 清单 | C3（指针校验） |
+| 4 | **INV-029** | 交付门禁重算 baseline + 退役凭据 | C2 |
+| 5 | INV-012 | C4 dirty 指纹 + D-04 ignored 策略 | D-04 决策 |
+| 6 | INV-023/024 | C9 CI 证据层级 + C8 报告指纹 | 外部 CI |
+| 7 | INV-017 | C7 统一事务 | C6 |
+| 8 | INV-010/011 | 资源别名 + worktree 隔离（生产必须） | C4 |
 
 ## 四、不变量 → 目标强制点（实施顺序建议）
 
@@ -167,17 +195,18 @@
 
 ## 六、与现状的差异汇总
 
-| 能力 | 现状 | 目标 | 差异性质 |
+| 能力 | 现状 | 目标 | 依据 |
 | --- | --- | --- | --- |
-| 计划来源 | CR 只约束 change-apply | 所有 v>1 计划都要基于 CR/审计记录 | 收紧 |
-| 需求基准 | 无指纹 | digest + 回归绑定 | 新增 |
-| traceability | 双份无校验 | 指针哈希 + 导入归档 | 收紧 |
-| Git 归属 | 整份剔除 baseline dirty | 逐文件指纹比较 | 修正 |
-| ignored | 不可见 | 策略化阻断 | 新增 |
-| 项目状态 | 命令直接赋值 | 迁移表 + 单一入口 | 重构 |
-| 多文件写 | 只有 change-apply 有事务 | 统一 `apply_multi` | 扩展 |
-| 报告 | 只校验内容 | 内容 + 指纹 | 新增 |
-| 证据真实性 | 自洽校验 | 分层（自洽→可追溯→可选抽查） | 分层 |
-| 并行隔离 | 同工作区 | 可选 worktree | 可选 |
+| 计划来源 | CR 只约束 `change-apply`；`plan-activate` 无来源校验 | 所有 v>1 计划必须绑定已确认 CR（无 `--replan` 旁路） | D-01 |
+| 需求基准 | 只查存在/长度；无 digest | CLI 生成双 digest + `baselines.json`，全链路绑 `baseline_id` | D-02 |
+| traceability | 双份无一致性校验；同版本可覆盖 | 指针哈希 + 导入归档 + 单调版本 | D-02 |
+| 交付时需求校验 | 不校验退役凭据、不比对 digest | `release-ready`/`accept` 重算并校验 | D-02 / INV-029 |
+| Git 归属 | 整份剔除 baseline dirty；并行互相污染 | 逐文件指纹；生产并行必须 worktree | C4 / D-03 |
+| ignored | 不可见 | 待定策略（`allowlist`/`deny`/`off`） | D-04（待定） |
+| 项目状态 | 命令直接赋值；可回退/跳阶 | 迁移表 + 单一入口；失败不改状态 | C6 / D-06 |
+| 多文件写 | 只有 `change-apply` 有事务 | 统一 `apply_multi` | C7 |
+| 报告 | 只校验内容 | 内容 + `report_sha256` | C8 |
+| 证据真实性 | Agent 自证 + 自洽校验 | Agent 自报=过程记录；生产用 CI 结果（绑 commit + baseline） | D-05 |
+| 并行隔离 | 同工作区 | 生产必须 worktree；未实现前只允许串行 | D-03 / D-09 |
 
-> 需要产品/架构决策的点见 `08-decisions-required.md`。
+> 仍待定的决策（D-04 / D-07 / D-08 / D-10）见 `08-decisions-required.md`。
