@@ -101,6 +101,7 @@
 
 ```
 architecture-review/
+  00-summary.md                ← 七问结论 + 修订记录
   01-current-architecture.md   ← 模块与实现现状
   02-data-model.md             ← 由 01 的"数据写入点"展开
   03-lifecycle-and-state-machines.md ← 由 02 的"版本关系"展开
@@ -108,6 +109,6 @@ architecture-review/
   05-system-invariants.md      ← 汇总 02/03/04 的约束，编号 INV-001..028
   06-cross-module-risks.md     ← 每条风险回指 INV 编号
   07-target-architecture.md    ← 每条建议回指 INV 编号
-  08-decisions-required.md     ← 阻塞项与 07 的实施顺序对应
+  08-decisions-required.md     ← 已定决策（D-01/02/03/05/06）+ 待定项 + 实施顺序
   09-audit-index.md            ← 本文件
 ```
