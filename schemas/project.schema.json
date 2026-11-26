@@ -74,6 +74,20 @@
     "updated_at": { "type": "string" },
     "current_plan_version": { "type": ["integer", "null"], "minimum": 1 },
     "current_requirement_version": { "type": ["integer", "null"], "minimum": 1 },
+    "requirement_baseline": {
+      "type": ["object", "null"],
+      "description": "当前已确认需求基线的双摘要与唯一标识（由 req-confirm / change-apply 写入，禁止 project-set 修改）",
+      "required": ["version", "baseline_id", "traceability_digest", "confirmed_doc_digest", "confirmed_at"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "baseline_id": { "type": "string", "minLength": 16 },
+        "traceability_digest": { "type": "string", "minLength": 16 },
+        "confirmed_doc_digest": { "type": "string", "minLength": 16 },
+        "confirmed_by": { "type": ["string", "null"] },
+        "confirmed_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
     "tech_stack": {
       "type": "object",
       "description": "语言/框架/数据库/测试框架/构建方式等，键名自由",

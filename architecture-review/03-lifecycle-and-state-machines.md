@@ -1,7 +1,8 @@
 # 03 · 生命周期与状态机
 
-> 状态常量：`dfcore.py:29-75`；迁移函数：`df.py:159 transition()`（节点）；
-> 项目状态**没有**统一迁移表，由各命令直接赋值（证据见第五节）。
+> 状态常量：`dfcore.py:29-75`；节点迁移函数：`df.py transition()`；
+> 项目迁移表：`dfcore.py PROJECT_TRANSITIONS` + `df.py transition_project()`（第 1 批已实现）。
+> Requirement / Plan / CR / Regression / Release 的细粒度迁移仍由各命令校验。
 
 ## 一、端到端生命周期（正常路径）
 
@@ -134,80 +135,29 @@ stateDiagram-v2
 
 **禁止迁移**：一切不在 `TRANSITIONS` 中的组合（如 `completed→in_progress`、`cancelled→*`）。
 
-### 3.2 Project
-
-#### 实际行为（含缺陷，代码事实）
+### 3.2 Project（已实现迁移表 + D-01/D-06 收口）
 
 ```mermaid
 stateDiagram-v2
   [*] --> initialized
-  initialized --> requirements_confirmed: req-confirm
-  requirements_confirmed --> planned: plan-activate
-  planned --> in_progress: start
-  in_progress --> regression: regression-check
-  regression --> release_candidate: release
-  release_candidate --> release_ready: release-ready
-  release_ready --> accepted: release-accept
-  accepted --> in_progress: change-apply
-  planned --> requirements_confirmed: req-confirm（可执行，状态回退）
-  regression --> planned: plan-activate（可执行，状态回退）
-  release_candidate --> planned: plan-activate（可执行，状态回退）
-  release_candidate --> release_candidate: release（有 blockers 也置位）
-  initialized --> analyzing: （声明，无命令写入）
-  analyzing --> clarifying: （声明，无命令写入）
-```
-
-**关键事实（不要按理想状态机理解）**：
-
-- `release` 的准入**只拒绝 `accepted`**（`df.py:2246`），不是"只允许从 `regression` 执行"；
-  从 `planned`/`in_progress` 直接执行 `release` 也会被接受，并把状态写成 `release_candidate`
-  （`df.py:2435`），即使 blockers 非空。
-- `plan-activate` 不检查项目状态（`df.py:587-640`），可从 `regression`/`release_candidate` 回到 `planned`。
-- `req-confirm` 只排除 4 个阶段（`df.py:434-437`），`planned` 下会回退到 `requirements_confirmed`（`df.py:466-467`）。
-- 项目状态共 **8 处**直接赋值：`df.py:468`（requirements_confirmed）、`628`（planned）、
-  `1080`/`1736`（in_progress）、`2006`（regression）、`2435`（release_candidate）、
-  `2594`（release_ready）、`2627`（accepted）。没有迁移表。
-
-#### 风险
-
-1. 状态可以跳过阶段（`release` 从任意状态）或回退（`plan-activate`/`req-confirm`），
-   而回退不会让已产出的回归/交付证据自动失效（靠版本号与 baseline 比对兜底，见 3.6）。
-2. `release_candidate` 同时表示"报告已生成"和"具备候选资格"，两类事实混在一个字段里。
-3. 没有任何守卫保证"进入 `release_ready` 前一定经过完整回归"——这一步由 `release-ready` 重跑门禁弥补，
-   但状态本身不能证明。
-
-#### 目标状态机（D-01 / D-06，待实现）
-
-```mermaid
-stateDiagram-v2
-  [*] --> initialized
-  initialized --> requirements_confirmed: req-confirm（仅首次、计划未激活）
-  requirements_confirmed --> planned: plan-activate（仅 v1）
+  initialized --> requirements_confirmed: req-confirm（仅激活计划前）
+  initialized --> planned: plan-activate（仅首次 v1）
+  requirements_confirmed --> planned: plan-activate（仅首次 v1）
   planned --> in_progress: start
   in_progress --> regression: regression-check（无阻塞）
-  regression --> release_candidate: release（全部门禁满足）
-  release_candidate --> release_ready: release-ready
+  regression --> release_candidate: release（全部门禁满足，D-06）
+  release_candidate --> release_ready: release-ready（且非 blocked 报告）
   release_ready --> accepted: release-accept --by
+  release_candidate --> regression: regression-check（重跑回归）
+  release_ready --> regression: regression-check（重跑回归）
   accepted --> in_progress: change-apply（唯一出口）
 ```
 
-**目标禁止**：
+**已强制执行的约束（`PROJECT_TRANSITIONS` + `transition_project()`）**：
 
-- `planned/regression/release_candidate → requirements_confirmed`（需求变更只能走 CR）；
-- `regression/release_candidate → planned`（计划变更只能走 `change-apply`）；
-- `release` 在门禁失败时改状态（D-06：保持原状态，报告记 `blockers`）。
-
-| 迁移 | 触发命令 | 前置条件（实际） | 证据 | 问题 |
-| --- | --- | --- | --- | --- |
-| initialized→requirements_confirmed | `req-confirm` | 基准文档存在 + 追踪表合格 | 追踪表、基准 md | — |
-| planned→requirements_confirmed | `req-confirm` | **不检查 planned**（目标禁止） | 同上 | 状态回退 + 版本指针可改（A7） |
-| requirements_confirmed→planned | `plan-activate` | 计划 draft + validate | `approved_by/at` | 无事务；仅 v1 合法 |
-| planned/in_progress→planned | `plan-activate`（新版本） | 同上 | — | **绕过 CR 换计划**（B2） |
-| in_progress→regression | `regression-check` | 无 open 节点、证据齐、需求覆盖 | `precheck.md`、快照 | — |
-| regression→release_candidate | `release` | **只拒 accepted** | 报告 md + meta | blockers 非空也置位（D-06） |
-| release_candidate→release_ready | `release-ready` | 状态 + 全部门禁 + 报告完整 | `release_ready_at` | — |
-| release_ready→accepted | `release-accept --by` | 全部门禁重跑 | `accepted_by/at` | 不校验需求基线（A6 / INV-029） |
-| accepted→in_progress | `change-apply` | CR 完整校验 | 新计划 + CR applied | 唯一合法出口 |
+- **普通推进**：`initialized/requirements_confirmed → planned`（`plan-activate` 仅允许首次 v1）、`planned → in_progress`（`start`）、`planned/in_progress → regression`（`regression-check` 无阻塞）、`regression/release_candidate/release_ready → release_candidate`（`release` **全部门禁满足**时才置位；有 blockers 则保持原状态并写 `status="blocked"`）、`release_candidate → release_ready`（`release-ready`，并校验报告非 `blocked`）、`release_ready → accepted`（`release-accept --by`）。
+- **受控重跑回归**：`release_candidate / release_ready → regression`（`regression-check` 无阻塞时允许重新进入回归阶段，随后需重新 `release` → `release-ready`）。
+- **`change-apply` 受控退出/重开**：`accepted` 及各活跃阶段均可通过 `change-apply`（经 CR 确认 + `based_on` 绑定 + 事务）迁移到 `in_progress` 或 `planned`；`req-confirm` 在 `planned` 及之后阶段或已有 `active` 计划时一律拒绝回退。
 
 ### 3.3 Requirement（Schema / 当前 CLI / 目标 三层）
 

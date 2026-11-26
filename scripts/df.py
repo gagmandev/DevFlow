@@ -100,6 +100,7 @@ PROJECT_PROTECTED_FIELDS = {
     "status",
     "current_plan_version",
     "current_requirement_version",
+    "requirement_baseline",
     "created_at",
     "updated_at",
     "accepted_at",
@@ -532,7 +533,11 @@ def cmd_req_confirm(args) -> int:
             f"追踪表是 v{trace_version}，确认的是 v{version}；先导入对应版本"
         )
 
+    baseline = core.compute_requirement_baseline(version, trace, text)
+    baseline["confirmed_by"] = getattr(args, "by", None) or "user"
+    baseline["confirmed_at"] = core.now_iso()
     project.data["current_requirement_version"] = version
+    project.data["requirement_baseline"] = baseline
     transition_project(
         project,
         "requirements_confirmed",
@@ -540,7 +545,7 @@ def cmd_req_confirm(args) -> int:
         reason="只有激活计划前允许确认需求基准",
     )
     project.save()
-    print(f"需求基准 v{version} 已生效：{paths.rel(doc)}")
+    print(f"需求基准 v{version} 已生效：{paths.rel(doc)}（baseline_id={baseline['baseline_id'][:12]}）")
     print("下一步：plan（拆任务 → 生成草稿计划 → 用户审核 → plan-activate）")
     return 0
 
@@ -1844,7 +1849,21 @@ def cmd_change_apply(args) -> int:
         txn.phase("update_project")
         project.data["current_plan_version"] = target
         if cr.get("target_requirement_version"):
-            project.data["current_requirement_version"] = cr["target_requirement_version"]
+            target_rv = cr["target_requirement_version"]
+            project.data["current_requirement_version"] = target_rv
+            if (
+                project.data.get("requirement_baseline") is not None
+                and paths.traceability.exists()
+                and paths.confirmed_requirements(target_rv).exists()
+            ):
+                trace_now = core.load_traceability(paths)
+                if trace_now and str(trace_now.get("requirement_version")) == str(target_rv):
+                    new_baseline = core.compute_requirement_baseline(
+                        target_rv, trace_now, core.read_text(paths.confirmed_requirements(target_rv))
+                    )
+                    new_baseline["confirmed_by"] = cr.get("confirmed_by") or "user"
+                    new_baseline["confirmed_at"] = core.now_iso()
+                    project.data["requirement_baseline"] = new_baseline
         target_status = "in_progress" if any(
             n["status"] in ("completed", "in_progress") for n in plan["nodes"]
         ) else "planned"
@@ -2348,16 +2367,32 @@ def delivery_blockers(
     traceability = core.load_traceability(paths)
     plan_rv = plan.get("requirement_version")
     proj_rv = project.data.get("current_requirement_version")
+    recorded_baseline = project.data.get("requirement_baseline")
+    versioned_proj_trace = (
+        paths.requirements / f"traceability-v{proj_rv}.json"
+        if proj_rv is not None else None
+    )
+    has_req_baseline = bool(
+        recorded_baseline is not None
+        or traceability is not None
+        or (versioned_proj_trace is not None and versioned_proj_trace.exists())
+    )
+
     if proj_rv is not None:
-        versioned_proj_trace = paths.requirements / f"traceability-v{proj_rv}.json"
-        if traceability is None and versioned_proj_trace.exists():
-            blockers.append(f"存在 {paths.rel(versioned_proj_trace)}，但缺少 {paths.rel(paths.traceability)}")
         if plan_rv is not None and str(proj_rv) != str(plan_rv):
             blockers.append(
                 f"计划 v{plan.get('plan_version')} 基于需求 v{plan_rv}，但项目当前需求版本是 v{proj_rv}"
             )
         if not paths.confirmed_requirements(proj_rv).exists():
             blockers.append(f"缺少需求基准文件 {paths.rel(paths.confirmed_requirements(proj_rv))}")
+
+    if has_req_baseline:
+        if proj_rv is None:
+            blockers.append("存在需求追踪表或基线记录，但 project.current_requirement_version 为空")
+        if traceability is None:
+            blockers.append(f"缺少当前需求追踪表 {paths.rel(paths.traceability)}")
+        if versioned_proj_trace is not None and not versioned_proj_trace.exists():
+            blockers.append(f"缺少版本化需求追踪表 {paths.rel(versioned_proj_trace)}")
 
     if traceability is not None:
         sv = validator.SchemaValidator(SKILL_DIR / "schemas")
@@ -2367,16 +2402,39 @@ def delivery_blockers(
         trace_rv = traceability.get("requirement_version")
         if trace_rv is not None and plan_rv is not None and str(trace_rv) != str(plan_rv):
             blockers.append(f"需求追踪表版本是 v{trace_rv}，当前计划基于需求 v{plan_rv}")
+        if trace_rv is not None and proj_rv is not None and str(trace_rv) != str(proj_rv):
+            blockers.append(f"需求追踪表版本是 v{trace_rv}，项目当前需求版本是 v{proj_rv}")
         if trace_rv is not None:
             versioned_trace_path = paths.requirements / f"traceability-v{trace_rv}.json"
             if versioned_trace_path.exists():
                 versioned_trace = core.load_json(versioned_trace_path)
-                cur_canon = json.dumps(traceability.get("requirements") or [], ensure_ascii=False, sort_keys=True)
-                ver_canon = json.dumps(versioned_trace.get("requirements") or [], ensure_ascii=False, sort_keys=True)
-                if cur_canon != ver_canon:
+                if core.canonical_json(traceability.get("requirements") or []) != core.canonical_json(
+                    versioned_trace.get("requirements") or []
+                ):
                     blockers.append(
                         f"traceability.json 与 {paths.rel(versioned_trace_path)} 内容不一致，需求基线可能被绕过修改"
                     )
+
+        if isinstance(recorded_baseline, dict) and proj_rv is not None:
+            if recorded_baseline.get("version") != proj_rv:
+                blockers.append(
+                    f"需求基线记录版本是 v{recorded_baseline.get('version')}，与项目当前需求版本 v{proj_rv} 不一致"
+                )
+            doc_path = paths.confirmed_requirements(proj_rv)
+            if doc_path.exists():
+                actual_baseline = core.compute_requirement_baseline(
+                    proj_rv, traceability, core.read_text(doc_path)
+                )
+                if actual_baseline["confirmed_doc_digest"] != recorded_baseline.get("confirmed_doc_digest"):
+                    blockers.append(
+                        f"需求基准文档 {paths.rel(doc_path)} 内容已被修改（digest 与确认记录不一致），不能继续交付"
+                    )
+                if actual_baseline["traceability_digest"] != recorded_baseline.get("traceability_digest"):
+                    blockers.append(
+                        f"需求追踪表 {paths.rel(paths.traceability)} 内容已被修改（digest 与确认记录不一致），不能继续交付"
+                    )
+                if actual_baseline["baseline_id"] != recorded_baseline.get("baseline_id"):
+                    blockers.append("需求基线 baseline_id 校验失败，请通过变更流程重新确认")
 
         reqs = traceability.get("requirements", []) or []
         by_req = {
@@ -2703,10 +2761,26 @@ def release_report_problems(
                 f"交付报告对应需求 v{meta.get('requirement_version')}，"
                 f"当前需求是 v{plan.get('requirement_version')}"
             )
+        if meta.get("status") != "release_candidate":
+            problems.append(
+                f"交付报告当前状态是 {meta.get('status')!r}（不是 release_candidate），"
+                "请先修复阻塞项并重新运行 `df.py release` 生成新的交付报告"
+            )
+        meta_blockers = meta.get("blockers")
+        if not isinstance(meta_blockers, list) or meta_blockers:
+            count = len(meta_blockers) if isinstance(meta_blockers, list) else "?"
+            problems.append(
+                f"交付报告仍记录有 {count} 项未通过门槛，"
+                "请重新运行 `df.py release` 生成无阻塞的交付报告"
+            )
     else:
         problems.append(
             f"缺少交付报告元信息 {paths.rel(meta_path)}（版本绑定）；重新运行 `df.py release`"
         )
+
+    _, gate_body = _find_section(sections, "交付门槛检查")
+    if "未通过（" in gate_body or "门槛未通过，未进入 release_candidate" in text:
+        problems.append("交付报告正文仍显示门槛未通过，请重新运行 `df.py release` 生成新的交付报告")
 
     for name in required_sections:
         title, body = _find_section(sections, name)

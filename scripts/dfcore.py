@@ -131,6 +131,32 @@ def dump_json(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
+def canonical_json(data) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def compute_requirement_baseline(
+    version: int,
+    traceability: dict,
+    doc_text: str,
+) -> dict:
+    """按 D-02 规范计算需求基线双摘要与 baseline_id。"""
+    reqs = traceability.get("requirements") if isinstance(traceability, dict) else []
+    trace_digest = sha256_text(canonical_json(reqs or []))
+    doc_digest = sha256_text(doc_text)
+    baseline_id = sha256_text(f"v{version}|{trace_digest}|{doc_digest}")
+    return {
+        "version": int(version),
+        "baseline_id": baseline_id,
+        "traceability_digest": trace_digest,
+        "confirmed_doc_digest": doc_digest,
+    }
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """先写临时文件再 os.replace，避免中断导致半截文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)

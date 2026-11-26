@@ -262,7 +262,7 @@ CLI parser 逐一核对——parser 当前共注册 **33** 个命令，加上 **
 | **读正式状态 + 写派生** | 读正式状态，重渲染看板/依赖图等派生文件 | 取锁 → 查 OPEN → 读 → 写派生 → 释放 | `board` / `graph` / `doctor`（注 2） |
 | **读正式状态 + 写 staging** | 读完整正式基准（追踪表 / baseline / 计划版本），计算 staging 基准信息；只写 `changes/*/staging/**`，**不修改正式状态** | 取锁（与正式写者同一互斥锁）→ 查 OPEN → 读完整正式基准 → 生成 staging → **完成后释放锁** | `change-stage`（注 3，待实现） |
 | **事务性修改正式状态** | 多文件正式写入，需要 OPEN + journal + Transaction 崩溃恢复 | 取**写**锁 → OPEN → 事务写入 → committed → 删 OPEN → 释放 | `change-apply`（当前唯一；见「OPEN + journal 适用范围」） |
-| **非事务写正式状态** | 读 + 写正式文件，但当前未纳入 Transaction，**只有锁互斥、无崩溃恢复** | 取**写**锁（`MUTATING_COMMANDS`，现有协议）；崩溃后可能留下部分写入，恢复依赖 `doctor` + 人工 | `init`（注 4，首次初始化锁）/ `migrate` / `project-set` / `prompt-init` / `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-new` / `change-set` / `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` / `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` |
+| **非事务写正式状态** | 读 + 写正式文件，但当前未纳入 Transaction，**只有锁互斥、无崩溃恢复** | 取**写**锁（`MUTATING_COMMANDS`，现有协议）；崩溃后可能留下部分写入，恢复依赖 `doctor` + 人工 | `init`（注 4，当前不在 `MUTATING_COMMANDS`、未使用 `project_lock`，首次初始化锁待设计）/ `migrate` / `project-set` / `prompt-init` / `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-new` / `change-set` / `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` / `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` |
 | **事务恢复** | 读 journal / 快照 / OPEN，按恢复协议回滚或确认 | **独立恢复协议**（注 5），不走普通读取路径 | `recover` |
 
 > `scripts/dependency_check.py` 是**内部模块**（被 `doctor` / `validate` 内部调用，

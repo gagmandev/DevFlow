@@ -11,17 +11,17 @@
 | accepted 白名单 | `df.py:78 ACCEPTED_ALLOWED`、`df.py:212 accepted_denial()` | `test_v14_gates.py:701 test_every_writer_is_denied_by_default` | `SKILL.md` 第 14.3 节 |
 | project-set 字段白名单 | `df.py:92/98`、`df.py:330` | `test_v14_gates.py:790 ProjectSetGuardTest` | `SKILL.md` "项目档案只能改资料性字段" |
 | 节点状态迁移表 | `dfcore.py:61 TRANSITIONS`、`df.py:159 transition()` | `test_devflow.py:323 StateMachineTest` | `docs/data-structure.md` §四 |
-| 项目状态无迁移表（8 处赋值） | `df.py:468/628/1080/1736/2006/2435/2594/2627` | **无** | 本文档 03 节 3.2 |
+| 项目状态迁移表（已收口） | `dfcore.py PROJECT_TRANSITIONS`、`df.py transition_project()` | `test_invariants.py TestInv015ProjectStateMachineAndRelease` | 本文档 03 节 3.2 |
 | 需求验收标准强制 | `dfcore.py:1898 acceptance_spec_problems`、`df.py:399`、`validate.py:296`、`df.py:1900+` | `test_v14_gates.py:850 RequirementSpecTest` | `SKILL.md` 第 4 节 |
-| 非 active 退役凭据 | `dfcore.py:1458 requirement_retirement_problems` | `test_p1_workflow.py:68 RegressionCoverageTest` | `references/requirement-analysis.md` |
+| 非 active 退役凭据 | `dfcore.py requirement_retirement_problems`（`req-import`/`validate`/`regression-check`/`delivery_blockers`） | `RegressionCoverageTest`、`test_invariants.py` | `references/requirement-analysis.md` |
 | CR 与计划严格绑定 | `df.py:1664-1689` | `test_v14_gates.py:288 ChangeBindingTest` | `references/change-management.md` |
 | CR 基准过期拒绝 | `df.py:1640-1660` | `test_p1_workflow.py:856 ChangeBaseVersionTest` | 同上 |
 | 无 CR 换计划的缺口 | `df.py:522`、`validate.py:516-523`、`df.py:587` | **无**（本次新增结论） | 本文档 03 节 B2 |
-| ready 后改需求缩小交付范围 | `df.py:399`（无状态门槛）、`df.py:2231-2232`（跳过非 active）、`df.py:2565/2602`（交付不重校验） | **无** | 06 节 A6、05 节 INV-029 |
-| 计划激活无唯一入口（v2 可 plan-activate） | `df.py:587-640`（无版本限制）、`df.py:522`（based_on 可空） | **无** | 08 D-01、07 C1、03 §3.5 |
-| 需求变更无暂存目录 | 无 `changes/*/staging`；`df.py:423` 直写正式 | **无** | 08 D-02 §1-§5、03 §二 |
-| `planned` 下 req-confirm 回退状态 | `df.py:434-437`、`df.py:466-467` | **无** | 06 节 A7、03 节 B10 |
-| 退役凭据的实际调用点 | `validate.py:297`、`df.py:1931`（仅两处） | `RegressionCoverageTest` | 05 节 INV-005 |
+| ready 后改需求缩小交付范围（已拦截） | `df.py cmd_req_import`（状态门槛）、`cmd_req_confirm`（写 `requirement_baseline`）、`delivery_blockers`（双摘要+退役凭据+缺失校验） | `test_invariants.py TestInv029AndInv005RequirementsAndDelivery` | 06 节 A6、05 节 INV-029 |
+| 计划激活唯一入口（已收口） | `df.py cmd_plan_activate`（仅首次 v1；v2+ 拒绝并指向 `change-apply`） | `test_invariants.py TestInv008PlanActivationUniqueEntry` | 08 D-01、07 C1、03 §3.5 |
+| 需求变更暂存目录（待实现） | 无 `changes/*/staging`、`baselines.json`、`change-stage` | **无** | 08 D-02 §1-§5、03 §二 |
+| `planned` 下 req-confirm 回退（已拦截） | `df.py cmd_req_confirm`（拒绝 `planned`+ 与已激活计划） | `test_invariants.py TestInv015ProjectStateMachineAndRelease` | 06 节 A7、03 节 B10 |
+| 退役凭据的实际调用点 | `cmd_req_import`、`traceability_problems`、`validate.py`、`cmd_regression_check`、`delivery_blockers` | `RegressionCoverageTest`、`test_invariants.py` | 05 节 INV-005 |
 | 事务实际使用点 | 仅 `df.py:1706`（`change-apply`） | `TransactionTest`（只测事务对象） | 02 节 §四 |
 | 事务只保证写回滚、无读原子 | `dfcore.py:781`（Transaction 无 OPEN/锁概念）、读命令不取锁 | **无** | 08 D-02 §5b、05 INV-017、04 §5.6 |
 | OPEN 检查后无需锁的结论已撤销 | 第四轮 §5b 的推论存在检查点↔读取点竞态窗口；第五轮改为读写互斥 | 本结论为本轮新增（静态推导） | 08 D-02 §5b |
@@ -46,7 +46,7 @@
 | 交付门禁（节点/回归/需求） | `df.py:2208 delivery_blockers` | `test_p0_hardening.py:651 ReleaseStateTest` | `docs/workflow.md` |
 | 交付报告完整性 | `df.py:2484 release_report_problems` | `test_v14_gates.py:107 ReleaseGateTest` | `references/release-rules.md` |
 | release-ready/accept 同源门禁 | `df.py:2565`、`df.py:2602`（都调 `delivery_gate_problems`） | 同上 | 同上 |
-| release 失败仍改状态 | `df.py:2435` | **无** | 本文档 06 节 D2 |
+| release 失败不改状态 + blocked 报告拦截 | `df.py cmd_release`（仅无 blockers 置 `release_candidate`）、`release_report_problems`（拒绝 `blocked` 报告） | `test_invariants.py TestInv015ProjectStateMachineAndRelease` | 08 D-06、05 节 INV-015 |
 | 事务（仅 change-apply） | `dfcore.py:781 Transaction`、`df.py:1706` | `test_p0_hardening.py:549 TransactionTest` | `docs/architecture.md` |
 | 锁（RLock + OS 锁） | `dfcore.py:357-410` | `test_p0_hardening.py:391 LockTest`、`:472 liveness` | `docs/architecture.md` |
 | doctor 写图未加锁 | `df.py:3338`、`df.py:47` | **无** | 本文档 06 节 C3 |

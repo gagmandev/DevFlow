@@ -1,5 +1,7 @@
 """第一批核心不变量测试：D-01 (INV-008)、D-06 (INV-015)、INV-029/005、init --force。"""
 
+from __future__ import annotations
+
 import json
 import sys
 import tempfile
@@ -254,6 +256,75 @@ class TestInv015ProjectStateMachineAndRelease(unittest.TestCase):
         finally:
             p.close()
 
+    def test_inv_015_blocked_release_report_cannot_pass_release_ready(self):
+        """D-06：release_candidate 下出现 blocked 报告后，必须重跑 release 才能 release-ready。"""
+        p = self._ready_for_release()
+        try:
+            reg_path = Path(tempfile.mkdtemp()) / "reg.json"
+            reg_path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(p.run("regression-import", "--file", str(reg_path))[0], 0)
+            self.assertEqual(p.run("release")[0], 0)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
+
+            # 破坏节点测试证据并再次运行 release -> 报告变为 blocked，项目状态保持 release_candidate
+            test_report_path = p.paths.node_dir("DF-001") / "test-report.json"
+            original_report = test_report_path.read_text(encoding="utf-8")
+            bad_report = json.loads(original_report)
+            bad_report["status"] = "failed"
+            test_report_path.write_text(json.dumps(bad_report, ensure_ascii=False), encoding="utf-8")
+
+            code, out = p.run("release")
+            self.assertEqual(code, 1, out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
+            meta = core.load_json(p.paths.releases / "release-report.json")
+            self.assertEqual(meta["status"], "blocked")
+            self.assertTrue(meta["blockers"])
+
+            # 修复证据但不重跑 release，直接 release-ready 必须被拒绝
+            test_report_path.write_text(original_report, encoding="utf-8")
+            code, out = p.run("release-ready")
+            self.assertEqual(code, 1, out)
+            self.assertIn("release", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
+
+            # 重新执行 release 生成无阻塞报告后，release-ready 通过
+            code, out = p.run("release")
+            self.assertEqual(code, 0, out)
+            meta = core.load_json(p.paths.releases / "release-report.json")
+            self.assertEqual(meta["status"], "release_candidate")
+            self.assertEqual(meta["blockers"], [])
+
+            code, out = p.run("release-ready")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
+    def test_inv_015_release_ready_and_accept_gate_sources(self):
+        p = self._ready_for_release()
+        try:
+            # regression 阶段未跑 release 不能直接 release-ready / release-accept
+            code, out = p.run("release-ready")
+            self.assertEqual(code, 2, out)
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 2, out)
+
+            reg_path = Path(tempfile.mkdtemp()) / "reg.json"
+            reg_path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(p.run("regression-import", "--file", str(reg_path))[0], 0)
+            self.assertEqual(p.run("release")[0], 0)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
+
+            # release_candidate 不能直接 release-accept
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 2, out)
+
+            # release_candidate 允许重跑 regression-check 回到 regression
+            self.assertEqual(p.run("regression-check")[0], 0)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "regression")
+        finally:
+            p.close()
+
 
 class TestInv029AndInv005RequirementsAndDelivery(unittest.TestCase):
     """INV-029 + INV-005：需求导入门槛与交付门禁防绕过（A6 防护）。"""
@@ -389,6 +460,89 @@ class TestInv029AndInv005RequirementsAndDelivery(unittest.TestCase):
             self.assertEqual(code, 1, out)
             self.assertIn("内容不一致", out)
             self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
+    def test_inv_029_normal_project_with_baseline_digest_delivers(self):
+        p = self._ready_project_with_req()
+        try:
+            proj = core.load_json(p.paths.project)
+            self.assertIn("requirement_baseline", proj)
+            self.assertTrue(proj["requirement_baseline"]["baseline_id"])
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "accepted")
+        finally:
+            p.close()
+
+    def test_inv_029_modified_confirmed_doc_after_ready_blocks_accept(self):
+        """修改需求确认 Markdown 内容（版本号不变），release-accept 必须拒绝。"""
+        p = self._ready_project_with_req()
+        try:
+            doc = p.paths.confirmed_requirements(1)
+            doc.write_text(doc.read_text(encoding="utf-8") + "\n悄悄新增一条未确认需求。\n", encoding="utf-8")
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 1, out)
+            self.assertIn("digest", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
+    def test_inv_029_missing_traceability_files_block_accept(self):
+        """缺失当前追踪表、版本化追踪表或两者同时缺失，均必须阻断交付。"""
+        for mode in ("current_only", "versioned_only", "both"):
+            p = self._ready_project_with_req()
+            try:
+                if mode in ("current_only", "both"):
+                    p.paths.traceability.unlink()
+                if mode in ("versioned_only", "both"):
+                    (p.paths.requirements / "traceability-v1.json").unlink()
+                code, out = p.run("release-accept", "--by", "tester")
+                self.assertEqual(code, 1, f"{mode} 应阻断：{out}")
+                self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+            finally:
+                p.close()
+
+    def test_inv_029_missing_confirmed_doc_blocks_accept(self):
+        p = self._ready_project_with_req()
+        try:
+            p.paths.confirmed_requirements(1).unlink()
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 1, out)
+            self.assertIn("缺少需求基准文件", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
+    def test_inv_029_plan_requirement_version_mismatch_blocks_release(self):
+        p = self._ready_project_with_req()
+        try:
+            plan = p.plan(1)
+            plan["requirement_version"] = 2
+            core.atomic_write_json(p.paths.backlog(1), plan)
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 1, out)
+            self.assertIn("需求", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
+    def test_inv_029_infrastructure_project_without_traceability_delivers(self):
+        """没有需求追踪表的合法基础设施项目仍可正常交付。"""
+        p = Project()
+        try:
+            p.import_plan([node("DF-001")])
+            p.activate()
+            code, out = complete_node(p)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(p.run("regression-check")[0], 0)
+            reg_path = Path(tempfile.mkdtemp()) / "reg.json"
+            reg_path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(p.run("regression-import", "--file", str(reg_path))[0], 0)
+            self.assertEqual(p.run("release")[0], 0)
+            self.assertEqual(p.run("release-ready")[0], 0)
+            self.assertEqual(p.run("release-accept", "--by", "tester")[0], 0)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "accepted")
         finally:
             p.close()
 
