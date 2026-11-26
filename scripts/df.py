@@ -185,6 +185,28 @@ def refresh(project: core.Project, plan: dict, quiet: bool = False) -> list[str]
     return unlocked
 
 
+def transition_project(
+    project: core.Project,
+    new: str,
+    *,
+    allowed_from: set[str] | None = None,
+    reason: str = "",
+) -> None:
+    """项目状态迁移唯一入口（INV-015 / D-06）。"""
+    old = project.effective_status()
+    if allowed_from is not None and old not in allowed_from:
+        raise DevFlowError(
+            f"项目当前状态是 {old}，不允许迁移到 {new}"
+            + (f"（{reason}）" if reason else "")
+        )
+    allowed = core.PROJECT_TRANSITIONS.get(old, set())
+    if new not in allowed:
+        raise DevFlowError(
+            f"项目状态不允许从 {old} 变为 {new}（合法目标：{', '.join(sorted(allowed)) or '无'}）"
+        )
+    project.data["status"] = new
+
+
 def transition(node: dict, new: str, **fields) -> None:
     old = node.get("status", "pending")
     if old == new:
@@ -273,12 +295,22 @@ def cmd_init(args) -> int:
         core.atomic_write_json(paths.project, project)
     else:
         project = core.load_json(paths.project)
-        project["project_type"] = project_type
-        if args.profile:
+        if core.PROJECT_STATUS_MIGRATIONS.get(project.get("status"), project.get("status")) == "accepted":
+            raise DevFlowError("项目已验收（accepted），不能用 init --force 覆盖项目档案")
+        changed = False
+        new_type = args.type or project_type
+        if project.get("project_type") != new_type:
+            project["project_type"] = new_type
+            changed = True
+        if args.profile and project.get("quality_profile") != args.profile:
             project["quality_profile"] = args.profile
+            changed = True
         elif not project.get("quality_profile"):
             print("! 这份项目档案没有 quality_profile（旧项目），先按 development 门禁处理；"
                   "要升级请显式设置：df.py project-set --profile production")
+        if changed:
+            project["updated_at"] = core.now_iso()
+            core.atomic_write_json(paths.project, project)
 
     if not paths.decisions.exists():
         core.atomic_write_text(paths.decisions, _decisions_seed(project))
@@ -398,17 +430,40 @@ def cmd_project_set(args) -> int:
 
 def cmd_req_import(args) -> int:
     _, paths, project = ctx(args)
+    status = project.effective_status()
+    active_plans = [
+        v for v in project.plan_versions()
+        if core.load_json(paths.backlog(v)).get("status") == "active"
+    ]
+    if (
+        project.data.get("current_plan_version") is not None
+        or active_plans
+        or project.data.get("current_requirement_version") is not None
+        or status not in ("initialized", "analyzing", "clarifying")
+    ):
+        raise DevFlowError(
+            f"项目处于 {status} 阶段（或已确认需求 / 已激活计划），"
+            "不能通过 req-import 直接覆写正式需求追踪表。\n"
+            "需求变更请走变更流程：change-new → change-set → change-apply"
+        )
+
     data = core.load_json(Path(args.file))
 
-    # 先查验收标准：这比 Schema 的 oneOf 报错更容易看懂
-    # （只查 active 的验收标准；非 active 的退役凭据由 validate / 回归检查）
-    spec_problems: list[str] = []
-    for req in (data.get("requirements") or []) if isinstance(data, dict) else []:
+    # 先查验收标准与退役凭据：这比 Schema 的 oneOf 报错更容易看懂
+    reqs = (data.get("requirements") or []) if isinstance(data, dict) else []
+    by_req = {
+        req.get("req_id"): req
+        for req in reqs
+        if isinstance(req, dict) and req.get("req_id")
+    }
+    req_problems: list[str] = []
+    for req in reqs:
         if isinstance(req, dict):
-            spec_problems.extend(core.acceptance_spec_problems(req))
-    if spec_problems:
+            req_problems.extend(core.acceptance_spec_problems(req))
+            req_problems.extend(core.requirement_retirement_problems(req, by_req))
+    if req_problems:
         raise DevFlowError(
-            "需求追踪表不满足规则，未导入：\n  " + "\n  ".join(spec_problems)
+            "需求追踪表不满足规则，未导入：\n  " + "\n  ".join(req_problems)
         )
 
     sv = validator.SchemaValidator(SKILL_DIR / "schemas")
@@ -419,6 +474,11 @@ def cmd_req_import(args) -> int:
     version = args.version or data.get("requirement_version") or 1
     data["requirement_version"] = version
     versioned = paths.requirements / f"traceability-v{version}.json"
+    if versioned.exists():
+        hist = paths.requirements / "history"
+        hist.mkdir(parents=True, exist_ok=True)
+        stamp = re.sub(r"[-:T+]", "", core.now_iso())[:15]
+        shutil.copy2(versioned, hist / f"traceability-v{version}.{stamp}.json")
     core.atomic_write_json(versioned, data)
     # traceability.json 始终是"当前版本"的副本，历史版本留在 traceability-vN.json
     core.atomic_write_json(paths.traceability, data)
@@ -431,9 +491,17 @@ def cmd_req_import(args) -> int:
 def cmd_req_confirm(args) -> int:
     _, paths, project = ctx(args)
     status = project.effective_status()
-    if status in ("in_progress", "regression", "release_candidate", "release_ready"):
+    active_plans = [
+        v for v in project.plan_versions()
+        if core.load_json(paths.backlog(v)).get("status") == "active"
+    ]
+    if (
+        status not in ("initialized", "analyzing", "clarifying", "requirements_confirmed")
+        or project.data.get("current_plan_version") is not None
+        or active_plans
+    ):
         raise DevFlowError(
-            f"项目已进入 {status} 阶段，需求基准不能原地重确认。"
+            f"项目已进入 {status} 阶段（或已有激活计划），需求基准不能原地重确认。"
             "需要改需求请走变更流程：change-new → change-apply"
         )
     version = args.version or project.data.get("current_requirement_version") or 1
@@ -465,7 +533,12 @@ def cmd_req_confirm(args) -> int:
         )
 
     project.data["current_requirement_version"] = version
-    project.data["status"] = "requirements_confirmed"
+    transition_project(
+        project,
+        "requirements_confirmed",
+        allowed_from={"initialized", "analyzing", "clarifying", "requirements_confirmed"},
+        reason="只有激活计划前允许确认需求基准",
+    )
     project.save()
     print(f"需求基准 v{version} 已生效：{paths.rel(doc)}")
     print("下一步：plan（拆任务 → 生成草稿计划 → 用户审核 → plan-activate）")
@@ -556,8 +629,14 @@ def cmd_plan_import(args) -> int:
     if dependency_check_main != 0:
         print("! 依赖检查有问题，先修依赖再看板")
     print("")
-    print("计划处于 draft 状态，不能执行。请用户审核任务边界/依赖/优先级后运行：")
-    print(f"  python df.py plan-activate --version {version}")
+    if version > 1 or project.data.get("current_plan_version") is not None:
+        if not plan.get("based_on"):
+            print("! 提示：v2 及以上计划在 change-apply 时要求 based_on={change_id, plan_version}")
+        print("计划处于 draft 状态，不能通过 plan-activate 激活。请绑定 CR 并审核后运行：")
+        print("  python df.py change-apply --change <CR-ID>")
+    else:
+        print("计划处于 draft 状态，不能执行。请用户审核任务边界/依赖/优先级后运行：")
+        print(f"  python df.py plan-activate --version {version}")
     return 0
 
 
@@ -588,9 +667,37 @@ def cmd_plan_activate(args) -> int:
     _, paths, project = ctx(args)
     version = args.version
     plan = core.load_json(paths.backlog(version))
-    if plan.get("status") == "active":
+    current_plan_version = project.data.get("current_plan_version")
+
+    # D-01：首次计划 v1 允许 plan-activate；v2 及以上只能通过 change-apply 生效
+    if version == 1 and plan.get("status") == "active" and current_plan_version == 1:
         print(f"计划 v{version} 已经是生效计划")
         return 0
+    if version != 1:
+        raise DevFlowError(
+            f"计划 v{version} 不能通过 plan-activate 激活：只有首次计划 v1 允许 plan-activate，"
+            "v2 及以上版本只能通过 `change-apply` 生效。\n"
+            "请先确认变更记录并应用：change-new → change-set → change-apply --change <CR-ID>"
+        )
+
+    other_active = [
+        v for v in project.plan_versions()
+        if core.load_json(paths.backlog(v)).get("status") == "active"
+    ]
+    if current_plan_version is not None or other_active:
+        raise DevFlowError(
+            f"项目已存在生效计划（current_plan_version={current_plan_version}，"
+            f"active={other_active}），不能再用 plan-activate 激活计划。\n"
+            "后续计划变更必须走变更流程：change-new → change-set → change-apply"
+        )
+
+    status = project.effective_status()
+    if status not in ("initialized", "analyzing", "clarifying", "requirements_confirmed"):
+        raise DevFlowError(
+            f"项目当前状态是 {status}，不能使用 plan-activate（仅首次初始化/需求确认阶段允许）。\n"
+            "需要更换计划请走变更流程：change-new → change-set → change-apply"
+        )
+
     if plan.get("status") != "draft":
         raise DevFlowError(f"计划 v{version} 状态是 {plan.get('status')}，只有 draft 能激活")
 
@@ -610,11 +717,12 @@ def cmd_plan_activate(args) -> int:
     for warning in report.warnings:
         print(f"! {warning}")
 
-    old_version = project.data.get("current_plan_version")
-    if old_version and old_version != version:
-        old = core.load_json(paths.backlog(old_version))
-        old["status"] = "superseded"
-        core.atomic_write_json(paths.backlog(old_version), old)
+    transition_project(
+        project,
+        "planned",
+        allowed_from={"initialized", "analyzing", "clarifying", "requirements_confirmed"},
+        reason="仅首次激活 v1 可置为 planned",
+    )
 
     plan["status"] = "active"
     plan["approved_at"] = core.now_iso()
@@ -625,7 +733,6 @@ def cmd_plan_activate(args) -> int:
     project.data["current_requirement_version"] = plan.get(
         "requirement_version", project.data.get("current_requirement_version")
     )
-    project.data["status"] = "planned"
     project.save()
 
     refresh(project, plan)
@@ -1064,6 +1171,12 @@ def cmd_start(args) -> int:
         })
         print(f"! 已记录上下文变更确认：{reason}")
 
+    transition_project(
+        project,
+        "in_progress",
+        allowed_from={"planned", "in_progress"},
+        reason="只有 planned/in_progress 阶段允许开始执行节点",
+    )
     prev_status = node["status"]
     transition(node, "in_progress", owner=args.owner or "code-agent", started_at=core.now_iso())
     _new_attempt(node)
@@ -1077,7 +1190,6 @@ def cmd_start(args) -> int:
     archived = []
     if prev_status in ("ready", "needs_review", "completed", "failed", "blocked"):
         archived = archive_reports(paths, node)
-    project.data["status"] = "in_progress"
     project.save()
     refresh(project, plan)
 
@@ -1733,9 +1845,10 @@ def cmd_change_apply(args) -> int:
         project.data["current_plan_version"] = target
         if cr.get("target_requirement_version"):
             project.data["current_requirement_version"] = cr["target_requirement_version"]
-        project.data["status"] = "in_progress" if any(
+        target_status = "in_progress" if any(
             n["status"] in ("completed", "in_progress") for n in plan["nodes"]
         ) else "planned"
+        transition_project(project, target_status, reason="change-apply 迁移项目状态")
         project.save()
 
         txn.phase("update_change")
@@ -2003,7 +2116,12 @@ def cmd_regression_check(args) -> int:
     print(f"检查表：{paths.rel(out)}")
     print(f"源代码快照：{snapshot['snapshot_id'][:12]}（{snapshot['type']}，{snapshot['file_count']} 个文件）")
     if not blockers:
-        project.data["status"] = "regression"
+        transition_project(
+            project,
+            "regression",
+            allowed_from={"planned", "in_progress", "regression", "release_candidate", "release_ready"},
+            reason="回归前置检查通过",
+        )
         project.save()
         print("项目状态已置为 regression。")
         print("执行真实构建与测试后，把结果写成 JSON 再导入：")
@@ -2227,22 +2345,72 @@ def delivery_blockers(
     blockers.extend(regression_problems(paths, plan, allow_legacy_regression))
     blockers.extend(snapshot_problems(paths, plan))
 
-    for req in (core.load_traceability(paths) or {}).get("requirements", []):
-        if req.get("status") != "active":
-            continue
-        owners = [n for n in plan["nodes"] if req["req_id"] in n.get("requirement_ids", [])]
-        if not owners:
-            blockers.append(f"需求 {req['req_id']} 没有对应节点")
-        elif not any(n["status"] == "completed" for n in owners):
-            blockers.append(f"需求 {req['req_id']} 的节点都未完成")
+    traceability = core.load_traceability(paths)
+    plan_rv = plan.get("requirement_version")
+    proj_rv = project.data.get("current_requirement_version")
+    if proj_rv is not None:
+        versioned_proj_trace = paths.requirements / f"traceability-v{proj_rv}.json"
+        if traceability is None and versioned_proj_trace.exists():
+            blockers.append(f"存在 {paths.rel(versioned_proj_trace)}，但缺少 {paths.rel(paths.traceability)}")
+        if plan_rv is not None and str(proj_rv) != str(plan_rv):
+            blockers.append(
+                f"计划 v{plan.get('plan_version')} 基于需求 v{plan_rv}，但项目当前需求版本是 v{proj_rv}"
+            )
+        if not paths.confirmed_requirements(proj_rv).exists():
+            blockers.append(f"缺少需求基准文件 {paths.rel(paths.confirmed_requirements(proj_rv))}")
+
+    if traceability is not None:
+        sv = validator.SchemaValidator(SKILL_DIR / "schemas")
+        for err in sv.validate(traceability, "requirements.schema.json"):
+            blockers.append(f"traceability.json {err}")
+
+        trace_rv = traceability.get("requirement_version")
+        if trace_rv is not None and plan_rv is not None and str(trace_rv) != str(plan_rv):
+            blockers.append(f"需求追踪表版本是 v{trace_rv}，当前计划基于需求 v{plan_rv}")
+        if trace_rv is not None:
+            versioned_trace_path = paths.requirements / f"traceability-v{trace_rv}.json"
+            if versioned_trace_path.exists():
+                versioned_trace = core.load_json(versioned_trace_path)
+                cur_canon = json.dumps(traceability.get("requirements") or [], ensure_ascii=False, sort_keys=True)
+                ver_canon = json.dumps(versioned_trace.get("requirements") or [], ensure_ascii=False, sort_keys=True)
+                if cur_canon != ver_canon:
+                    blockers.append(
+                        f"traceability.json 与 {paths.rel(versioned_trace_path)} 内容不一致，需求基线可能被绕过修改"
+                    )
+
+        reqs = traceability.get("requirements", []) or []
+        by_req = {
+            r.get("req_id"): r
+            for r in reqs
+            if isinstance(r, dict) and r.get("req_id")
+        }
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            if req.get("status") != "active":
+                blockers.extend(core.requirement_retirement_problems(req, by_req))
+                continue
+            blockers.extend(core.acceptance_spec_problems(req))
+            owners = [n for n in plan["nodes"] if req["req_id"] in n.get("requirement_ids", [])]
+            if not owners:
+                blockers.append(f"需求 {req['req_id']} 没有对应节点")
+            elif not any(n["status"] == "completed" for n in owners):
+                blockers.append(f"需求 {req['req_id']} 的节点都未完成")
+            else:
+                completed_owners = [n for n in owners if n["status"] == "completed"]
+                if _requirement_evidence_missing(paths, req, completed_owners):
+                    blockers.append(
+                        f"需求 {req['req_id']} 的验收标准没有对应验证证据"
+                        "（覆盖节点的报告里没有 met=true 且带证据的验收项）"
+                    )
     return blockers
 
 
 def cmd_release(args) -> int:
-    """只生成交付报告并置为 release_candidate，不代表已交付。"""
+    """生成交付报告；只有全部门禁满足时才置为 release_candidate（D-06）。"""
     _, paths, project = ctx(args)
     plan = project.current_plan()
-    if project.data.get("status") == "accepted":
+    if project.effective_status() == "accepted":
         raise DevFlowError("项目已验收（accepted），不需要重新生成交付报告")
 
     blockers = delivery_blockers(paths, project, plan, getattr(args, "legacy_regression", False))
@@ -2265,13 +2433,19 @@ def cmd_release(args) -> int:
         else:
             implemented_unverified.append(node)
 
+    current_status = project.effective_status()
+    report_status = (
+        f"**{current_status}**（门槛未通过，未进入 release_candidate）"
+        if blockers
+        else "**release_candidate**（报告已生成，未验收）"
+    )
     lines = [
         f"# 交付报告 · {project.data['project_name']}",
         "",
         f"- 计划版本：v{plan['plan_version']}（需求基准 v{plan.get('requirement_version')}）",
         f"- 生成时间：{core.now_iso()}",
         f"- 项目类型：{project.data['project_type']}",
-        f"- 交付状态：**release_candidate**（报告已生成，未验收）",
+        f"- 交付状态：{report_status}",
         "",
         "## 0. 交付门槛检查",
         "",
@@ -2422,7 +2596,7 @@ def cmd_release(args) -> int:
         "requirement_version": plan.get("requirement_version"),
         "generated_at": core.now_iso(),
         "generated_by": "df.py release",
-        "status": "release_candidate",
+        "status": "blocked" if blockers else "release_candidate",
         "blockers": blockers,
         "sections": list(md_sections("\n".join(lines)).keys()),
         "counts": {
@@ -2432,20 +2606,29 @@ def cmd_release(args) -> int:
         },
     }
     core.atomic_write_json(paths.releases / RELEASE_META, meta)
-    project.data["status"] = "release_candidate"
-    project.data["release_candidate_at"] = core.now_iso()
-    project.save()
 
     print(f"交付报告已生成：{paths.rel(out)}")
     print(f"- 已验证 {len(verified)} | 已实现未验证 {len(implemented_unverified)} | 未实现 {len(missing)}")
-    print("- 状态：release_candidate（报告已生成，**未**交付）")
     if blockers:
+        if getattr(args, "legacy_regression", False):
+            project.save()
+        print(f"- 状态：{project.effective_status()}（门槛未通过，未进入 release_candidate）")
         print("")
         print(f"✗ 交付门槛未通过（{len(blockers)} 项）：")
         for item in blockers:
             print(f"  - {item}")
-        print("修完再运行 release-ready；现在不能进入待验收状态。")
+        print("修完再重新运行 release；现在不能进入 release_candidate / 待验收状态。")
         return 1
+
+    transition_project(
+        project,
+        "release_candidate",
+        allowed_from={"regression", "release_candidate", "release_ready"},
+        reason="必须先通过 regression-check 进入 regression 阶段",
+    )
+    project.data["release_candidate_at"] = core.now_iso()
+    project.save()
+    print("- 状态：release_candidate（报告已生成，**未**交付）")
     print("下一步：`df.py release-ready` 检查交付条件，再交用户验收。")
     return 0
 
@@ -2591,7 +2774,12 @@ def cmd_release_ready(args) -> int:
         return 1
     if legacy_shortcut:
         print("! 这是旧项目的兼容路径（legacy_release_shortcut），交付报告按降级方式处理")
-    project.data["status"] = "release_ready"
+    transition_project(
+        project,
+        "release_ready",
+        allowed_from=allowed,
+        reason="只有 release_candidate（或兼容路径下的 regression）才能进入 release_ready",
+    )
     project.data["release_ready_at"] = core.now_iso()
     project.save()
     print("✓ 交付条件已满足，状态：release_ready")
@@ -2624,7 +2812,12 @@ def cmd_release_accept(args) -> int:
             print(f"  - {item}")
         print("重新跑回归并生成交付报告后再验收。")
         return 1
-    project.data["status"] = "accepted"
+    transition_project(
+        project,
+        "accepted",
+        allowed_from={"release_ready"},
+        reason="只有 release_ready 才能验收",
+    )
     project.data["accepted_at"] = core.now_iso()
     project.data["accepted_by"] = args.by
     project.save()

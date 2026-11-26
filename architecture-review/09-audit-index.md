@@ -26,7 +26,7 @@
 | 事务只保证写回滚、无读原子 | `dfcore.py:781`（Transaction 无 OPEN/锁概念）、读命令不取锁 | **无** | 08 D-02 §5b、05 INV-017、04 §5.6 |
 | OPEN 检查后无需锁的结论已撤销 | 第四轮 §5b 的推论存在检查点↔读取点竞态窗口；第五轮改为读写互斥 | 本结论为本轮新增（静态推导） | 08 D-02 §5b |
 | 读命令复用 ProjectLock 待代码审计 | 现锁为写命令设计（`dfcore.py` RLock+OS 锁）；`main()` 只对 MUTATING 加锁；超时拒绝路径、跨平台行为、读串行化未验证 | **无**（待实现） | 08 D-02 §5b 实现约束 |
-| 命令读取路径分类（第六轮核对 parser） | parser 实际注册 **33** 个命令（`add("x", cmd_xxx)` 32 + `board` lambda）；`dependency_check` 是内部模块非 CLI（`df.py:3338`）；`self-test` 全程 `mkdtemp`（`df.py:2730`）隔离，单独成类；`change-stage` 归"读正式+写 staging"（待实现）；`doctor` 读正式+写图不在 MUTATING（`df.py:3328/3338`）；`init` 不在 MUTATING 且首次初始化锁待设计；`recover` 独立协议 | `test_p0_hardening.LockTest`（覆盖写锁） | 08 D-02 §5b 分类表、04 §5.6 |
+| 命令读取路径分类（第六轮核对 parser） | parser 当前实际注册 **33** 个命令（`add("x", cmd_xxx)` 32 + `board` lambda）；`dependency_check` 是内部模块非 CLI（`df.py:3338`）；`self-test` 全程 `mkdtemp`（`df.py:2730`）隔离，单独成类；`change-stage` 归"读正式+写 staging"（待实现），分类表覆盖 33 个现存命令 + 1 个目标命令 = 34 条目；`doctor` 读正式+写图不在 MUTATING（`df.py:3328/3338`）；`init` 当前不在 MUTATING、未使用 `project_lock`，首次初始化锁仍待设计实现；`recover` 独立协议（当前仅支持 `--apply`，`--complete` 尚未实现） | `test_p0_hardening.LockTest`（覆盖写锁） | 08 D-02 §5b 分类表、04 §5.6 |
 | OPEN + journal 适用范围 | 仅 `change-apply` 用 Transaction（`df.py:1706`）；`plan-activate`(3 写)/`release`(4 写)/`req-import`(2 写)/`regression-import`/`accept` 持锁但无事务，崩溃留部分写入（02 §四 G2–G7） | `TransactionTest`（只测事务对象） | 08 D-02 §5b 三概念区分、05 INV-017 |
 | `--by`/`confirmed_by` 无身份验证 | `--by` 直接入库（`change-set`/`release-accept` 等，CLI 无凭据核验） | **无** | 04 §5.5、08 D-02 §3 |
 | DAG 检环/依赖校验 | `dfcore.py:1390 find_cycles`、`validate.py:437-460` | `test_devflow.py:243 GraphTest` | `references/task-decomposition.md` |

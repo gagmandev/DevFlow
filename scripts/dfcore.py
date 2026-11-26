@@ -43,6 +43,20 @@ PROJECT_STATUSES = [
 # 旧状态 → 新状态。只在显式迁移或读取时使用，不静默改写用户文件。
 PROJECT_STATUS_MIGRATIONS = {"released": "accepted"}
 
+# 项目合法状态迁移表（INV-015 / D-06）。任何表外迁移都必须拒绝。
+PROJECT_TRANSITIONS = {
+    "initialized": {"analyzing", "clarifying", "requirements_confirmed", "planned", "in_progress"},
+    "analyzing": {"clarifying", "requirements_confirmed", "planned", "in_progress"},
+    "clarifying": {"requirements_confirmed", "planned", "in_progress"},
+    "requirements_confirmed": {"requirements_confirmed", "planned", "in_progress"},
+    "planned": {"planned", "in_progress", "regression"},
+    "in_progress": {"planned", "in_progress", "regression"},
+    "regression": {"regression", "release_candidate", "release_ready", "in_progress", "planned"},
+    "release_candidate": {"release_candidate", "release_ready", "regression", "in_progress", "planned"},
+    "release_ready": {"release_ready", "accepted", "release_candidate", "regression", "in_progress", "planned"},
+    "accepted": {"in_progress", "planned"},
+}
+
 NODE_STATUSES = [
     "pending",
     "ready",
@@ -1934,9 +1948,15 @@ def acceptance_spec_problems(req: dict) -> list[str]:
 def traceability_problems(trace: dict) -> list[str]:
     """需求追踪表整体校验（导入/确认/回归都要用同一套）。"""
     problems: list[str] = []
-    for req in trace.get("requirements", []) or []:
+    reqs = trace.get("requirements", []) or []
+    by_req = {
+        req.get("req_id"): req
+        for req in reqs
+        if isinstance(req, dict) and req.get("req_id")
+    }
+    for req in reqs:
         problems.extend(acceptance_spec_problems(req))
-        problems.extend(requirement_retirement_problems(req))
+        problems.extend(requirement_retirement_problems(req, by_req))
     return problems
 
 

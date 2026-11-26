@@ -900,12 +900,20 @@ class RequirementSpecTest(unittest.TestCase):
         finally:
             p.close()
 
-    def test_deferred_without_reason_imports_but_validate_fails(self):
+    def test_deferred_without_reason_rejected_at_import_and_validate(self):
         p, code, out = self._import([
             {"req_id": "REQ-002", "title": "旧需求", "category": "functional", "status": "deferred"},
         ])
         try:
-            self.assertEqual(code, 0, out)
+            self.assertEqual(code, 2, out)
+            self.assertIn("reason", out)
+
+            core.atomic_write_json(p.paths.traceability, {
+                "schema_version": "1.0", "requirement_version": 1,
+                "requirements": [
+                    {"req_id": "REQ-002", "title": "旧需求", "category": "functional", "status": "deferred"},
+                ],
+            })
             code, out = p.run("validate")
             self.assertEqual(code, 1, out)
             self.assertIn("reason", out)

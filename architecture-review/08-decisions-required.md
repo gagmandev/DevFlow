@@ -251,7 +251,8 @@ OPEN 标记**只能**充当崩溃残留的哨兵，**不能**保护已通过检�
   并发读在提交期间可能观察中间态，只能靠运维约定缓解。
 
 **命令读取路径分类表**（第六轮修订：按**实际读取与写入内容**分类，命令名与
-CLI parser 逐一核对——parser 共注册 **33** 个命令，本表覆盖全部 33 个，无虚构、无遗漏；
+CLI parser 逐一核对——parser 当前共注册 **33** 个命令，加上 **1** 个待实现目标命令 `change-stage`，
+本表共覆盖 **34 条目**（33 个现存 CLI 命令 + `change-stage`），无虚构、无遗漏；
 未确认行为标"待代码审计"）：
 
 | 类别 | 判定标准 | 锁协议 | 命令 |
@@ -294,12 +295,14 @@ CLI parser 逐一核对——parser 共注册 **33** 个命令，本表覆盖全
    （INV-025 已记录）。
 5. **`recover`**：在 `MUTATING_COMMANDS` 里（取写锁），但必须额外校验恢复状态
    （journal phase / status）才能执行；`--apply` 回滚到快照并删 OPEN；
-   `--complete` 只允许在 journal=committed 时清标记。它不走普通读取/写入路径。
-6. parser 实际注册 **33** 个命令（`accept/block/board/cancel/change-apply/change-new/
+   `recover --complete`（只允许在 journal=committed 时清标记）**尚未在 parser 与 handler 中实现**
+   （当前仅支持 `--apply`）。它不走普通读取/写入路径。
+6. parser 当前实际注册 **33** 个命令（`accept/block/board/cancel/change-apply/change-new/
    change-set/doctor/fail/graph/init/migrate/next/plan-activate/plan-import/project-set/
    prompt-init/recover/regression-check/regression-import/release/release-accept/
    release-ready/req-confirm/req-import/retry/self-test/start/status/supersede/sync/task/
-   validate`），本表 7 类合计恰好覆盖 33 个。**未列出的未来新增命令默认按最严格处理**：
+   validate`），加上待实现的 `change-stage`，本表 7 类共覆盖 **34 条目**（33 个现存 CLI 命令 +
+   1 个目标命令）。**未列出的未来新增命令默认按最严格处理**：
    只要读取正式数据就纳入互斥协议；是否有例外以本表 + 代码审计为准。
 
 **互斥锁 / 事务原子性 / 崩溃恢复：三个概念严格区分（第六轮新增）**

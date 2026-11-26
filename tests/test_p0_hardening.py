@@ -736,8 +736,14 @@ class ReleaseStateTest(unittest.TestCase):
             code, out = p.run("release")
             self.assertEqual(code, 1)
             self.assertIn("回归未通过", out)
-            self.assertEqual(core.load_json(p.paths.project)["status"], "release_candidate")
-            self.assertEqual(p.run("release-ready")[0], 1)
+            # D-06：门禁失败时保持原状态，不得进入 release_candidate
+            self.assertEqual(core.load_json(p.paths.project)["status"], "regression")
+            meta = core.load_json(p.paths.releases / "release-report.json")
+            self.assertEqual(meta["status"], "blocked")
+            self.assertTrue(meta["blockers"])
+            code_ready, out_ready = p.run("release-ready")
+            self.assertEqual(code_ready, 2)
+            self.assertIn("release_candidate", out_ready)
         finally:
             p.close()
 

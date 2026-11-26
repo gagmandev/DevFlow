@@ -53,9 +53,9 @@ def regression_payload(plan_version=1, requirement_version=1, status="passed", o
 def write_traceability(p, requirements):
     p.paths.requirements.mkdir(parents=True, exist_ok=True)
     data = {"schema_version": "1.0", "requirement_version": 1, "requirements": requirements}
-    path = p.paths.requirements / "traceability-v1.json"
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return quiet(df.main, ["req-import", "--file", str(path), "--version", "1", "--project", str(p.root)])
+    core.atomic_write_json(p.paths.requirements / "traceability-v1.json", data)
+    core.atomic_write_json(p.paths.traceability, data)
+    return 0, "ok"
 
 
 def complete_node(p, node_id="DF-001", version=1):
@@ -694,15 +694,32 @@ class PromptBindingTest(unittest.TestCase):
             p.import_plan([node("DF-001")], version=1)
             p.activate(1)
 
-            code, out = p.import_plan([node("DF-001", status="pending")], version=2)
+            code, out = p.run("change-new", "--title", "重规划", "--type", "modify")
             self.assertEqual(code, 0, out)
-            code, out = p.run("plan-activate", "--version", "2")
+            cr_path = p.paths.change_dir("CR-001") / "change-request.json"
+            cr = core.load_json(cr_path)
+            cr.update({
+                "status": "confirmed",
+                "base_plan_version": 1,
+                "base_requirement_version": 1,
+                "target_plan_version": 2,
+                "target_requirement_version": 1,
+            })
+            core.atomic_write_json(cr_path, cr)
+
+            code, out = p.import_plan(
+                [node("DF-001", status="pending")],
+                version=2,
+                based_on={"change_id": "CR-001", "plan_version": 1},
+            )
+            self.assertEqual(code, 0, out)
+            code, out = p.run("change-apply", "--change", "CR-001")
             self.assertEqual(code, 1)
             self.assertIn("提示词过期", out)
 
             code, out = p.run("prompt-init", "DF-001", "--plan", "2", "--force")
             self.assertEqual(code, 0, out)
-            code, out = p.run("plan-activate", "--version", "2")
+            code, out = p.run("change-apply", "--change", "CR-001")
             self.assertEqual(code, 0, out)
             code, out = p.run("start", "DF-001")
             self.assertEqual(code, 0, out)
