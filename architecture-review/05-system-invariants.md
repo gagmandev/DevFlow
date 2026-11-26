@@ -85,7 +85,7 @@
 | INV-026 | 中断后必须能恢复到一致状态 | 事务、写命令 | `Transaction`（仅 change-apply）+ `recover`（`df.py:2641`）+ `doctor` 检测 open 事务 | `TransactionTest`（3，只覆盖事务对象与回滚） | 部分 | 只有 change-apply 有 journal；`plan-activate`/`release`/`req-import`/`regression-import` 中断后无自动恢复协议；`doctor` 发现不了「半套文件」 | P1 |
 | INV-027 | 失败默认安全：缺证据 → failed/阻断；Git 不可用且配置要求 → 阻断；报告不完整 → 阻断 | 全部校验 | `evidence_problems`、`snapshot_problems`、`release_report_problems` | 覆盖在 Evidence/Release/Accept 各测试类 | 已实现 | 兼容路径（legacy）例外，但会留痕 | P0 |
 | INV-028 | 最终验收必须由用户显式触发并记录验收人；系统不得自动置 `accepted` | 交付 | `release-accept --by`（`df.py:2602`）；无自动调用点 | `test_p0_hardening.ReleaseStateTest.test_release_ready_and_accept` | 已实现 | `self-test` 会自动跑到 accepted，但那是在临时目录（`df.py:3252`） | P0 |
-| INV-029 | 交付门禁（`release`/`release-ready`/`release-accept`）必须重新校验**当前**需求基线：digest 未变、退役凭据齐全、版本与计划一致 | 交付 | `cmd_req_import` 状态门槛 + `cmd_req_confirm` 写 `project.requirement_baseline`（双 digest + `baseline_id`）+ `delivery_blockers` 校验双份追踪表与文档 digest/缺失/退役凭据 | `TestInv029AndInv005RequirementsAndDelivery`（9+ 用例） | **部分** | 首次确认基线与交付重校验已闭环；变更暂存 `change-stage`、`baselines.json` 追加账本与 `regression-import` 绑定 `baseline_id` 待第 2 批实现 | **P0** |
+| INV-029 | 交付门禁（`release`/`release-ready`/`release-accept`）必须重新校验**当前**需求基线：digest 未变、退役凭据齐全、版本与计划一致 | 交付 | `cmd_req_import` 状态门槛 + `cmd_req_confirm` 写 `project.requirement_baseline` + `delivery_blockers` 强制有正式需求的项目存在有效 `requirement_baseline`（旧项目缺 baseline 时 fail-closed，需显式 `migrate --adopt-baseline --by --reason`）并校验双份追踪表与文档 digest/缺失/退役凭据 | `TestInv029AndInv005RequirementsAndDelivery` | **部分** | 交付端双摘要与旧项目 fail-closed 已闭环；变更暂存 `change-stage`、`baselines.json` 追加账本与 `regression-import` 绑定 `baseline_id` 待第 2 批实现 | **P0** |
 
 ## 汇总与优先级
 
@@ -95,14 +95,11 @@
 | 部分实现 | 11 | 001 010 011 012 017 018 020 024 025 026 029 |
 | 未实现 | 3 | 002 003 023 |
 
-**必须先修的 6 条 P0（未实现/部分）**：
+**当前剩余必须推进的 P0（未实现/部分）**：
 
-1. **INV-008**：计划变更绕过 CR（`plan-import` + `plan-activate` 无 based_on 要求）——可直接改范围、加节点。
-2. **INV-002 / 003 / 020**：需求基准无内容指纹、版本指针无一致性/单调性校验、回归只绑版本号。
-3. **INV-029**：交付门禁不重校验需求基线 —— `release_ready` 后改需求即可缩小交付范围（A6）。
-4. **INV-015**：项目状态无迁移表，`plan-activate`/`release` 可跳阶回退、`req-confirm` 可回退。
-5. **INV-012**：Git 归属盲区（baseline dirty、ignored 文件）——交付质量证据可能漏掉越界改动。
-6. **INV-023**：证据真实性无机制（自证 + 自洽校验；SHA-256 不证明执行过程）。
+1. **INV-002 / 003 / 020 / 029（第 2 批 D-02 剩余部分）**：`change-stage` 暂存目录、`baselines.json` 追加账本、`regression-import` 绑定 `baseline_id`、需求版本单调性校验。
+2. **INV-012 / 011（第 2 批 C4/C5）**：Git 归属盲区（baseline dirty 逐文件指纹、production 下 `ignored` 文件 `deny` 策略）。
+3. **INV-023 / 024（D-05）**：证据真实性无独立锚点（生产回归需 CI `commit_sha` + `baseline_id` 绑定与外部审批）。
 
 > 每条不变量的"可测试化"建议见 `07-target-architecture.md` 第五节；
 > 每条风险的复现细节见 `06-cross-module-risks.md`。

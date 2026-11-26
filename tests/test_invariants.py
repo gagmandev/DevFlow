@@ -546,6 +546,161 @@ class TestInv029AndInv005RequirementsAndDelivery(unittest.TestCase):
         finally:
             p.close()
 
+    def test_inv_029_legacy_project_without_baseline_blocks_delivery_and_plain_migrate(self):
+        """旧项目有追踪表与确认文档但缺 requirement_baseline 时，必须 fail-closed 且普通 migrate 不得静默生成。"""
+        p = Project()
+        try:
+            _write_valid_req_doc(p, 1)
+            p.paths.requirements.mkdir(parents=True, exist_ok=True)
+            trace = {
+                "schema_version": "1.0",
+                "requirement_version": 1,
+                "requirements": [{
+                    "req_id": "REQ-001", "title": "需求一", "category": "functional",
+                    "status": "active", "acceptance": ["命令退出码为 0"],
+                }],
+            }
+            core.atomic_write_json(p.paths.requirements / "traceability-v1.json", trace)
+            core.atomic_write_json(p.paths.traceability, trace)
+
+            p.import_plan([node("DF-001", requirement_ids=["REQ-001"])])
+            p.activate()
+            self.assertEqual(p.run("start", "DF-001")[0], 0)
+            p.write_evidence(evidence={
+                "requirement_acceptance": [
+                    {"req_id": "REQ-001", "criterion": "命令退出码为 0", "met": True, "evidence": "test_ok"},
+                ],
+            })
+            self.assertEqual(p.run("sync", "DF-001")[0], 0)
+            self.assertEqual(p.run("accept", "DF-001")[0], 0)
+            self.assertEqual(p.run("regression-check")[0], 0)
+            reg_path = Path(tempfile.mkdtemp()) / "reg.json"
+            reg_path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(p.run("regression-import", "--file", str(reg_path))[0], 0)
+
+            # 普通 migrate（即使升级 schema_version）不得自动伪造 requirement_baseline
+            proj = core.load_json(p.paths.project)
+            proj["schema_version"] = "1.3"
+            proj.pop("requirement_baseline", None)
+            core.atomic_write_json(p.paths.project, proj)
+            code, out = p.run("migrate")
+            self.assertEqual(code, 0, out)
+            self.assertIsNone(core.load_json(p.paths.project).get("requirement_baseline"))
+
+            # 修改确认文档后仍必须阻断
+            doc = p.paths.confirmed_requirements(1)
+            doc.write_text(doc.read_text(encoding="utf-8") + "\n未确认改动\n", encoding="utf-8")
+            code, out = p.run("release")
+            self.assertEqual(code, 1, out)
+            self.assertIn("requirement_baseline", out)
+
+            # 已有 active 计划的旧项目也不能绕过状态机跑普通 req-confirm
+            code, out = p.run("req-confirm", "--version", "1")
+            self.assertEqual(code, 2, out)
+            self.assertIsNone(core.load_json(p.paths.project).get("requirement_baseline"))
+
+            # 显式 migrate --adopt-baseline 必须带 --by 和 --reason
+            code, out = p.run("migrate", "--adopt-baseline")
+            self.assertEqual(code, 2, out)
+            self.assertIn("--by", out)
+
+            code, out = p.run("migrate", "--adopt-baseline", "--by", "owner", "--reason", "旧项目补建需求基线")
+            self.assertEqual(code, 0, out)
+            self.assertIn("显式采纳当前需求基线", out)
+            proj_after = core.load_json(p.paths.project)
+            self.assertTrue(proj_after["requirement_baseline"]["baseline_id"])
+            self.assertEqual(len(proj_after["baseline_adoptions"]), 1)
+            self.assertEqual(proj_after["baseline_adoptions"][0]["by"], "owner")
+            self.assertEqual(proj_after["baseline_adoptions"][0]["reason"], "旧项目补建需求基线")
+
+            # 显式采纳后即可正常交付
+            self.assertEqual(p.run("release")[0], 0)
+            self.assertEqual(p.run("release-ready")[0], 0)
+            self.assertEqual(p.run("release-accept", "--by", "owner")[0], 0)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "accepted")
+        finally:
+            p.close()
+
+    def test_change_apply_updates_requirement_baseline_and_rolls_back(self):
+        """change-apply 推进需求版本时在事务内更新 requirement_baseline，失败时完整回滚。"""
+        p = Project()
+        try:
+            _write_valid_req_doc(p, 1)
+            trace1 = _make_trace_file(p.root, [{
+                "req_id": "REQ-001", "title": "需求一", "category": "functional",
+                "status": "active", "acceptance": ["命令退出码为 0"],
+            }], version=1)
+            self.assertEqual(p.run("req-import", "--file", str(trace1), "--version", "1")[0], 0)
+            self.assertEqual(p.run("req-confirm", "--version", "1")[0], 0)
+            old_baseline = core.load_json(p.paths.project)["requirement_baseline"]
+
+            p.import_plan([node("DF-001", requirement_ids=["REQ-001"])], version=1)
+            self.assertEqual(p.activate(1)[0], 0)
+            self.assertEqual(p.run("start", "DF-001")[0], 0)
+            p.write_evidence(evidence={
+                "requirement_acceptance": [
+                    {"req_id": "REQ-001", "criterion": "命令退出码为 0", "met": True, "evidence": "test_ok"},
+                ],
+            })
+            self.assertEqual(p.run("sync", "DF-001")[0], 0)
+            self.assertEqual(p.run("accept", "DF-001")[0], 0)
+
+            # 准备 CR-001 将需求升到 v2、计划升到 v2
+            _confirm_cr(p, "CR-001", base_plan=1, target_plan=2, base_req=1, target_req=2)
+            _write_valid_req_doc(p, 2)
+            trace2 = {
+                "schema_version": "1.0",
+                "requirement_version": 2,
+                "requirements": [{
+                    "req_id": "REQ-001", "title": "需求一升级", "category": "functional",
+                    "status": "active", "acceptance": ["命令退出码为 0"],
+                }],
+            }
+            core.atomic_write_json(p.paths.requirements / "traceability-v2.json", trace2)
+            core.atomic_write_json(p.paths.traceability, trace2)
+
+            v2_nodes = [
+                node("DF-001", status="completed", requirement_ids=["REQ-001"]),
+                node("DF-002", dependencies=["DF-001"]),
+            ]
+            p.import_plan(
+                v2_nodes, version=2, requirement_version=2,
+                based_on={"change_id": "CR-001", "plan_version": 1},
+            )
+            self.assertEqual(p.run("prompt-init", "--all", "--plan", "2")[0], 0)
+
+            # 故障注入：事务写 project.json 失败时，requirement_baseline 与版本指针必须回滚
+            original = core.atomic_write_json
+
+            def failing(path, data):
+                if Path(path).name == "project.json":
+                    raise OSError("模拟写入失败")
+                return original(path, data)
+
+            core.atomic_write_json = failing
+            try:
+                code, out = quiet(df.main, ["change-apply", "--change", "CR-001", "--project", str(p.root)])
+            finally:
+                core.atomic_write_json = original
+
+            self.assertEqual(code, 2, out)
+            proj_after_fail = core.load_json(p.paths.project)
+            self.assertEqual(proj_after_fail["current_requirement_version"], 1)
+            self.assertEqual(proj_after_fail["requirement_baseline"], old_baseline)
+
+            # 恢复正常后再次 change-apply，requirement_baseline 原子切换为 v2
+            code, out = p.run("change-apply", "--change", "CR-001")
+            self.assertEqual(code, 0, out)
+            proj_after_ok = core.load_json(p.paths.project)
+            self.assertEqual(proj_after_ok["current_requirement_version"], 2)
+            self.assertEqual(proj_after_ok["requirement_baseline"]["version"], 2)
+            self.assertNotEqual(
+                proj_after_ok["requirement_baseline"]["baseline_id"],
+                old_baseline["baseline_id"],
+            )
+        finally:
+            p.close()
+
 
 class TestInitForcePersistence(unittest.TestCase):
     """init --force 修改项目档案后必须落盘，且不能覆写 accepted 项目。"""

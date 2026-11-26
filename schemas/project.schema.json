@@ -76,7 +76,7 @@
     "current_requirement_version": { "type": ["integer", "null"], "minimum": 1 },
     "requirement_baseline": {
       "type": ["object", "null"],
-      "description": "当前已确认需求基线的双摘要与唯一标识（由 req-confirm / change-apply 写入，禁止 project-set 修改）",
+      "description": "当前已确认需求基线的双摘要与唯一标识（由 req-confirm / change-apply / migrate --adopt-baseline 写入，禁止 project-set 修改）",
       "required": ["version", "baseline_id", "traceability_digest", "confirmed_doc_digest", "confirmed_at"],
       "properties": {
         "version": { "type": "integer", "minimum": 1 },
@@ -87,6 +87,23 @@
         "confirmed_at": { "type": "string" }
       },
       "additionalProperties": false
+    },
+    "baseline_adoptions": {
+      "type": "array",
+      "description": "旧项目显式重新采纳需求基线的审计记录",
+      "items": {
+        "type": "object",
+        "required": ["version", "baseline_id", "status_at_adoption", "reason", "by", "at"],
+        "properties": {
+          "version": { "type": "integer", "minimum": 1 },
+          "baseline_id": { "type": "string", "minLength": 16 },
+          "status_at_adoption": { "type": "string" },
+          "reason": { "type": "string", "minLength": 1 },
+          "by": { "type": "string", "minLength": 1 },
+          "at": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
     },
     "tech_stack": {
       "type": "object",

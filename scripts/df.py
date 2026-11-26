@@ -101,6 +101,7 @@ PROJECT_PROTECTED_FIELDS = {
     "current_plan_version",
     "current_requirement_version",
     "requirement_baseline",
+    "baseline_adoptions",
     "created_at",
     "updated_at",
     "accepted_at",
@@ -1803,6 +1804,27 @@ def cmd_change_apply(args) -> int:
     if rv and not paths.confirmed_requirements(rv).exists():
         raise DevFlowError(f"缺少需求基准 {paths.rel(paths.confirmed_requirements(rv))}")
 
+    new_baseline_for_apply = None
+    target_rv = cr.get("target_requirement_version")
+    if target_rv is not None and str(target_rv) != str(current_req_version):
+        doc_path = paths.confirmed_requirements(target_rv)
+        if not doc_path.exists():
+            raise DevFlowError(f"目标需求基准文档不存在：{paths.rel(doc_path)}")
+        trace_now = core.load_traceability(paths)
+        if project.data.get("requirement_baseline") is not None or trace_now is not None:
+            if trace_now is None:
+                raise DevFlowError(f"缺少目标需求追踪表 {paths.rel(paths.traceability)}，不能切换需求基线")
+            if str(trace_now.get("requirement_version")) != str(target_rv):
+                raise DevFlowError(
+                    f"需求追踪表版本是 v{trace_now.get('requirement_version')}，"
+                    f"与目标需求 v{target_rv} 不一致"
+                )
+            new_baseline_for_apply = core.compute_requirement_baseline(
+                target_rv, trace_now, core.read_text(doc_path)
+            )
+            new_baseline_for_apply["confirmed_by"] = cr.get("confirmed_by") or "user"
+            new_baseline_for_apply["confirmed_at"] = core.now_iso()
+
     old_plan_path = paths.backlog(current_plan_version) if current_plan_version else None
     old_plan = None
     if old_plan_path and old_plan_path != paths.backlog(target):
@@ -1848,22 +1870,10 @@ def cmd_change_apply(args) -> int:
 
         txn.phase("update_project")
         project.data["current_plan_version"] = target
-        if cr.get("target_requirement_version"):
-            target_rv = cr["target_requirement_version"]
+        if target_rv:
             project.data["current_requirement_version"] = target_rv
-            if (
-                project.data.get("requirement_baseline") is not None
-                and paths.traceability.exists()
-                and paths.confirmed_requirements(target_rv).exists()
-            ):
-                trace_now = core.load_traceability(paths)
-                if trace_now and str(trace_now.get("requirement_version")) == str(target_rv):
-                    new_baseline = core.compute_requirement_baseline(
-                        target_rv, trace_now, core.read_text(paths.confirmed_requirements(target_rv))
-                    )
-                    new_baseline["confirmed_by"] = cr.get("confirmed_by") or "user"
-                    new_baseline["confirmed_at"] = core.now_iso()
-                    project.data["requirement_baseline"] = new_baseline
+        if new_baseline_for_apply is not None:
+            project.data["requirement_baseline"] = new_baseline_for_apply
         target_status = "in_progress" if any(
             n["status"] in ("completed", "in_progress") for n in plan["nodes"]
         ) else "planned"
@@ -2393,6 +2403,15 @@ def delivery_blockers(
             blockers.append(f"缺少当前需求追踪表 {paths.rel(paths.traceability)}")
         if versioned_proj_trace is not None and not versioned_proj_trace.exists():
             blockers.append(f"缺少版本化需求追踪表 {paths.rel(versioned_proj_trace)}")
+        if not isinstance(recorded_baseline, dict):
+            blockers.append(
+                "项目存在正式需求数据，但缺少有效的 project.requirement_baseline（旧项目必须显式确认基线）。"
+                "请先核对当前需求文档与追踪表，再运行：`df.py migrate --adopt-baseline --by <确认人> --reason \"<原因>\"`"
+            )
+        else:
+            for req_key in ("version", "baseline_id", "traceability_digest", "confirmed_doc_digest"):
+                if not recorded_baseline.get(req_key):
+                    blockers.append(f"project.requirement_baseline 缺少字段 {req_key}")
 
     if traceability is not None:
         sv = validator.SchemaValidator(SKILL_DIR / "schemas")
@@ -3581,6 +3600,69 @@ def cmd_migrate(args) -> int:
     if getattr(args, "legacy_release", False):
         project.data["legacy_release_shortcut"] = True
         changes.append("legacy_release_shortcut: 已开启（允许 regression 直接 release_ready，仅供旧项目）")
+
+    if getattr(args, "adopt_baseline", False):
+        by = (getattr(args, "by", None) or "").strip()
+        reason = (getattr(args, "reason", None) or "").strip()
+        if not by or not reason:
+            raise DevFlowError(
+                "显式采纳旧项目需求基线必须提供 --by 与 --reason（记录审计原因，不能静默信任当前文件）"
+            )
+        trace = core.load_traceability(paths)
+        if not trace:
+            raise DevFlowError(f"缺少需求追踪表 {paths.rel(paths.traceability)}，无法采纳需求基线")
+        rv = project.data.get("current_requirement_version") or trace.get("requirement_version")
+        if not rv:
+            raise DevFlowError("无法确定需求版本号（current_requirement_version 与 traceability.requirement_version 均为空）")
+        if trace.get("requirement_version") is not None and str(trace.get("requirement_version")) != str(rv):
+            raise DevFlowError(
+                f"traceability.json 版本为 v{trace.get('requirement_version')}，与项目需求版本 v{rv} 不一致"
+            )
+        versioned_trace_path = paths.requirements / f"traceability-v{rv}.json"
+        if versioned_trace_path.exists():
+            versioned_trace = core.load_json(versioned_trace_path)
+            if core.canonical_json(trace.get("requirements") or []) != core.canonical_json(
+                versioned_trace.get("requirements") or []
+            ):
+                raise DevFlowError(
+                    f"traceability.json 与 {paths.rel(versioned_trace_path)} 内容不一致，请先核对后再采纳"
+                )
+        doc_path = paths.confirmed_requirements(rv)
+        if not doc_path.exists():
+            raise DevFlowError(f"缺少需求确认文档 {paths.rel(doc_path)}，无法采纳需求基线")
+        sv = validator.SchemaValidator(SKILL_DIR / "schemas")
+        errors = sv.validate(trace, "requirements.schema.json")
+        if errors:
+            raise DevFlowError("需求追踪表校验失败：\n  " + "\n  ".join(errors))
+        problems = core.traceability_problems(trace)
+        if problems:
+            raise DevFlowError("需求追踪表不满足规则：\n  " + "\n  ".join(problems))
+
+        doc_text = core.read_text(doc_path)
+        baseline = core.compute_requirement_baseline(rv, trace, doc_text)
+        now = core.now_iso()
+        baseline["confirmed_by"] = by
+        baseline["confirmed_at"] = now
+
+        print("== 显式采纳当前需求基线 ==")
+        print(f"- 项目状态：{project.effective_status()}")
+        print(f"- 需求版本：v{rv}（{len(trace.get('requirements') or [])} 条需求）")
+        print(f"- 需求文档：{paths.rel(doc_path)}")
+        print(f"- 追踪表：{paths.rel(paths.traceability)}")
+        print(f"- 新基线摘要：baseline_id={baseline['baseline_id'][:12]}（仅代表本次确认后的当前内容）")
+
+        project.data["current_requirement_version"] = int(rv)
+        project.data["requirement_baseline"] = baseline
+        project.data.setdefault("baseline_adoptions", []).append({
+            "version": int(rv),
+            "baseline_id": baseline["baseline_id"],
+            "status_at_adoption": project.effective_status(),
+            "reason": reason,
+            "by": by,
+            "at": now,
+        })
+        changes.append(f"requirement_baseline: 显式采纳 v{rv}（{by}：{reason}）")
+
     if changes:
         project.save()
         print("项目档案已升级：")
@@ -3792,6 +3874,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="升级时同时指定质量档位")
     p.add_argument("--legacy-release", action="store_true",
                    help="旧项目兼容：允许跳过 release 直接 release_ready（会记录在项目档案）")
+    p.add_argument("--adopt-baseline", action="store_true",
+                   help="旧项目显式采纳当前需求文档与追踪表作为正式基线（需 --by 与 --reason）")
+    p.add_argument("--by", default=None, help="显式确认人")
+    p.add_argument("--reason", default=None, help="采纳当前需求基线的理由")
 
     p = add("doctor", cmd_doctor, "全量体检")
     p.add_argument("--plan", type=int, default=None)

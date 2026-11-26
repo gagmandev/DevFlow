@@ -17,7 +17,7 @@
 | CR 与计划严格绑定 | `df.py:1664-1689` | `test_v14_gates.py:288 ChangeBindingTest` | `references/change-management.md` |
 | CR 基准过期拒绝 | `df.py:1640-1660` | `test_p1_workflow.py:856 ChangeBaseVersionTest` | 同上 |
 | 无 CR 换计划的缺口 | `df.py:522`、`validate.py:516-523`、`df.py:587` | **无**（本次新增结论） | 本文档 03 节 B2 |
-| ready 后改需求缩小交付范围（已拦截） | `df.py cmd_req_import`（状态门槛）、`cmd_req_confirm`（写 `requirement_baseline`）、`delivery_blockers`（双摘要+退役凭据+缺失校验） | `test_invariants.py TestInv029AndInv005RequirementsAndDelivery` | 06 节 A6、05 节 INV-029 |
+| ready 后改需求缩小交付范围（已拦截） | `df.py cmd_req_import`（状态门槛）、`cmd_req_confirm`（写 `requirement_baseline`）、`cmd_migrate --adopt-baseline`（旧项目显式采纳）、`cmd_change_apply`（需求升版事务同步更新 `requirement_baseline`）、`delivery_blockers`（无 baseline 时 fail-closed + 双摘要+退役凭据+缺失校验） | `test_invariants.py TestInv029AndInv005RequirementsAndDelivery` | 06 节 A6、05 节 INV-029 |
 | 计划激活唯一入口（已收口） | `df.py cmd_plan_activate`（仅首次 v1；v2+ 拒绝并指向 `change-apply`） | `test_invariants.py TestInv008PlanActivationUniqueEntry` | 08 D-01、07 C1、03 §3.5 |
 | 需求变更暂存目录（待实现） | 无 `changes/*/staging`、`baselines.json`、`change-stage` | **无** | 08 D-02 §1-§5、03 §二 |
 | `planned` 下 req-confirm 回退（已拦截） | `df.py cmd_req_confirm`（拒绝 `planned`+ 与已激活计划） | `test_invariants.py TestInv015ProjectStateMachineAndRelease` | 06 节 A7、03 节 B10 |
