@@ -153,9 +153,33 @@ change-new/change-set/plan-import/prompt-init/change-apply/recover`。其余写�
   - 报告由**CLI 代写**（Agent 把结果写到受限的 outbox，CLI 校验后搬入）；
   - 交付证据来自**外部 CI**（绑定 commit SHA + 需求 digest），而不是 Agent 的自述。
 
+### 5.5 身份与审批的信任边界（`--by` / `confirmed_by` 不是身份认证）
+
+**分层声明**：
+
+| 层 | 是什么 | 不是什么 |
+| --- | --- | --- |
+| `--by` / `confirmed_by` / `approved_by` 字段 | 调用者**自称**的操作者名，写入审计记录 | ❌ 身份认证（CLI 不验证） |
+| `ProjectLock`（文件锁） | 防并发写交错 | ❌ 不是身份认证，也不阻止"合法锁内的恶意操作" |
+| SHA-256 摘要 | 内容完整性声明（防误改） | ❌ 不是签名：无密钥绑定，任何人可重算 |
+| `requirement_acceptance` 证据 | Agent 自述 | ❌ 不是用户验收 |
+
+**区分两类威胁**：
+
+| 威胁 | 例子 | 当前机制 |
+| --- | --- | --- |
+| **误操作** | 忘了确认就 apply、改了 staging 没重确认、串行跑错命令 | 状态门槛 + staging 冻结 + 门禁重算（有效） |
+| **恶意操作者** | Agent 有仓库完整写权限，伪造审批记录、改 CR/manifest/摘要 | **当前无法防御**：无 OS 隔离、无外部审批锚点 |
+
+**目标（production，待实现）**：审批凭据来自仓库外（签名审批文件 / 外部审批系统 /
+CI approved review），CLI 核验"凭据 → 审批人 + CR id + staging manifest sha"一致才写
+`approval` 记录；执行 Agent 不持有凭据、对正式 CR / 已确认 manifest / 审批记录只读。
+没有这些外部边界时，**系统不能抵御恶意 Agent**，文档不得声称相反结论。
+
 ## 六、权限边界层面的结论
 
-1. **状态写权限收得比较紧**：project/plan 状态字段的写入都在 CLI 内，且 accepted 白名单默认拒绝。
+1. **状态写权限收得比较紧**：project/plan 状态字段的写入都在 CLI 内，且 accepted 白名单默认拒绝；
+   但**所有"操作者"字段（`--by`/`confirmed_by`）都只是审计声明**，CLI 不验证身份（见 5.5）。
 2. **证据、需求基准、以及 `.devflow` 内其他节点的报告，写权限基本没收**：靠"事后校验 + 人读"。
    这是当前最大的权限缺口（对应 INV-002 / 016 / 021 / 023）。
 3. **文件系统层没有隔离**：执行 Agent 技术上可改任何文件；`files_scope` 是**检测**而不是**阻止**。

@@ -58,7 +58,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | 提议 | `changes/CR-xxx/staging/**` + `manifest.json` | ❌ 不变 | 主控 |
 | 确认 | CR `requirement_change` + `staging_manifest_sha256` | ❌ 不变 | **用户**（`--by`） |
-| 提交 | 见 08 D-02 §5 的 9 个文件 | ✅ 事务内全量切换 | 主控执行 `change-apply` |
+| 提交 | 见 08 D-02 §5 的「需求变更原子提交文件集合」（核心 9 + 派生） | ✅ 事务内全量切换；并发读者由事务标记 + 读守卫拒绝（§5b） | 主控执行 `change-apply` |
 
 **提交前置（必须全部满足）**：
 - CR `confirmed`；`base_plan_version` / `base_requirement_version` == 当前指针；
@@ -69,14 +69,14 @@ flowchart LR
 
 **失败恢复**：
 - 校验失败：不写任何文件，staging 保留，CR 仍 `confirmed`；
-- 写入中失败：`Transaction` 回滚全部 9 个文件（含指针与 project），CR 回 `confirmed`；
+- 写入中失败：`Transaction` 按 `existed_before` 回滚文件集合（原本不存在则删除；含指针与 project），CR 回 `confirmed`；
 - 进程崩溃：journal 停在 open，`recover --apply` 回滚；`doctor` 报告未完成事务。
 
 **正式指针切换点**：只在 `change-apply` 的第 7 步（`traceability.json`），且与 project/plan 更新在同一事务。
 切换成功后，旧回归与旧交付报告因 `baseline_id` 不匹配而失效。
 
 > 现状：没有 staging，`req-import` 直接覆盖正式表；`change-apply` 只切计划，不处理需求文件。
-> 因此本节的 staging 与 9 文件事务都是**待实现**。
+> 因此本节的 staging 与「需求变更原子提交文件集合」都是**待实现**。
 
 ## 三、七个状态模型（合法迁移 / 触发命令 / 前置条件 / 证据）
 

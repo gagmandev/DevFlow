@@ -77,15 +77,43 @@
 - 新基准文档长度/章节；
 - 计划草稿的 `requirement_version == 新版本`、`based_on.change_id == CR`。
 
-#### 3. 谁来确认
+#### 3. 谁来确认：操作者声明 ≠ 用户审批（信任边界）
 
-- **主控**负责提议（写 staging、填 CR 的影响评估）。
-- **用户**负责确认：`change-set --change CR-001 --status confirmed --by 用户名 --reason "..."`。
-  确认时 CLI 重算 staging 的双 digest，并与 `manifest.json` 比对；不一致 → 拒绝确认
-  （防止确认后又被改）。
-- 确认写入 CR：`requirement_change = {from_version, to_version, from_baseline_id,
-  to_baseline_id, staging_manifest_sha256, confirmed_by, confirmed_at}`。
-- 确认后的 staging 视为**冻结**：再改 staging 必须重新确认（`manifest_sha256` 变化 → CR 回到 draft）。
+**先分清两个概念，全文不得混用**：
+
+| 概念 | 含义 | 现在的载体 |
+| --- | --- | --- |
+| 操作者声明（audit claim） | 调用者自称"我是谁"，CLI 不做任何验证 | `--by` 参数、`confirmed_by` 字段 |
+| 用户审批（approval） | 由**可验证的外部凭据**证明"某个真实的人同意了这次变更" | **当前不存在**（目标见下） |
+
+**当前事实**：`change-set --status confirmed --by 用户名` 中的 `--by` 是**调用者自行填写的
+字符串**，CLI 不验证它是谁。任何能执行命令的进程（包括执行 Agent）都可以填任意名字。
+因此 `confirmed_by` 只能作为**审计线索**，不是身份认证；`ProjectLock` 防并发、
+SHA-256 防误改，它们也都**不是**身份认证机制。
+
+**普通本地模式（development）**：`--by` 只作审计声明使用，文档与输出不得把它称为
+"已验证的审批人"。
+
+**生产模式（production）必须有独立审批机制**（目标，待实现）：
+
+1. **审批凭据与仓库分离**：审批结果由 CLI 从**外部锚点**取得并核验，例如
+   专用审批文件上的数字签名（公钥固定在 CLI 配置或环境，不放在仓库内）、
+   外部审批系统回调、或 CI 平台的 approved review 记录（API 取回 + 校验目标 commit）。
+2. **CLI 如何验证**：核验"签名/凭据 → 审批人身份 + 审批对象（CR id + staging manifest sha）"
+   三者一致才写 `approval = {mechanism, subject, verified_at, ref}`；`confirmed_by` 降级为
+   审批记录里的展示字段。凭据核验失败 → 拒绝确认。
+3. **执行 Agent 不得持有审批凭据**：签名私钥/审批令牌只存在于用户侧或 CI 侧；
+   执行 Agent 的运行环境不提供它们。
+4. **执行 Agent 不得直接修改**：正式 CR 文件、已确认的 staging manifest、审批记录
+   —— 这些路径在目标架构下对执行 Agent 只读（worktree + `.devflow` 只读，见 D-03）。
+
+**防护能力边界（必须如实声明）**：
+
+- 在**没有** OS 级权限隔离或外部审批锚点的部署里，系统**不能抵御**拥有仓库完整写权限的
+  恶意 Agent——它可以同时改 CR、manifest、审批记录和摘要。
+- 因此本节机制属于**防误操作**：防止主控/Agent 走错流程、忘确认、改了 staging 没重确认。
+  **防恶意操作者**只能靠外部边界：文件系统权限、独立 worktree、外部审批锚点、外部 CI。
+- 两类威胁的对应关系见 `04-permission-boundaries.md` §5.5。
 
 #### 4. baseline_id 如何绑定
 
@@ -104,35 +132,96 @@ baseline_id           = sha256("v{N}|" + traceability_digest + "|" + confirmed_d
 | Regression 报告 | `requirement_baseline_id` | 导入时写；交付时比对 |
 | Release 元信息 | `requirement_baseline_id` | `release-ready`/`accept` 比对 |
 
-#### 5. `change-apply` 的事务文件组与提交顺序（目标）
+#### 5. `change-apply` 的提交顺序与「需求变更原子提交文件集合」（目标）
 
-| 序 | 动作 | 文件 | 说明 |
-| --- | --- | --- | --- |
-| 0 | 全部校验（含 staging digest 重算） | — | 不动文件；失败直接返回 |
-| 1 | 开启事务快照 | 下表全部文件 | `Transaction.begin` |
-| 2 | 写入新版追踪表 | `requirements/traceability-v{N}.json` | 从 staging 复制 |
-| 3 | 写入新版基准文档 | `requirements/confirmed-requirements-v{N}.md` | 从 staging 复制 |
-| 4 | 追加基线清单 | `requirements/baselines.json` | **追加**，不覆盖历史 |
-| 5 | 激活新计划 | `plans/backlog-v{N}.json` | `status=active` + `requirement_baseline_id` |
-| 6 | 旧计划置为 superseded | `plans/backlog-v{Old}.json` | 无旧计划则跳过 |
-| 7 | **切换正式指针** | `requirements/traceability.json` | 从这一刻起正式读的是新版本 |
-| 8 | 更新项目档案 | `project.json` | `current_requirement_version` / `requirement_baseline` / `current_plan_version` / `status` |
-| 9 | 关闭 CR | `changes/CR-xxx/change-request.json` | `status=applied` + `applied_at` + `applied_baseline_id` |
-| 10 | 重渲染派生数据 | `plans/board-v{N}.md`、`plans/dependency-graph-v{N}.md` | 由新计划生成 |
-| 11 | 提交事务 | `.devflow/.txn/<id>/journal.json` | `status=committed` |
+**命名**：不再称"9 文件事务"。含需求变更的 CR 实际涉及 **10 个文件**
+（9 个核心状态文件 + 1 个派生文件，见下），统一称
+**「需求变更原子提交文件集合」（Commit Set）**。
 
-**指针切换时机**：只在第 7 步、且在整个事务内。对外语义是"要么全切、要么全不切"。
+**集合定义**：
 
-**并发读的问题（已知限制）**：读命令不持锁，理论上可能在第 2–10 步之间读到中间态。
-目标增强：`change-apply` 开始时写 `.devflow/.txn/<id>/OPEN`，所有读命令检测到 open 事务
-就提示"项目正在提交，请稍后"，或短暂等待锁。**当前实现没有这个机制**，只靠写锁互斥写者。
+| 类别 | 文件 | 必须 / 可选 |
+| --- | --- | --- |
+| 核心状态 | `requirements/traceability-v{N}.json`（新版追踪表） | 必须 |
+| 核心状态 | `requirements/confirmed-requirements-v{N}.md`（新版基准文档） | 必须（需求变更 CR） |
+| 核心状态 | `requirements/baselines.json`（基线清单，追加） | 必须（需求变更 CR） |
+| 核心状态 | `requirements/traceability.json`（正式指针） | 必须 |
+| 核心状态 | `project.json`（版本指针 / baseline / 生命周期状态） | 必须 |
+| 核心状态 | `plans/backlog-v{N}.json`（新计划置 active） | 必须 |
+| 核心状态 | `plans/backlog-v{Old}.json`（旧计划置 superseded） | 可选（首次应用无旧计划） |
+| 核心状态 | `changes/CR-xxx/change-request.json`（CR → applied） | 必须 |
+| 核心/事务 | `.devflow/.txn/<id>/journal.json`（事务日志，非项目数据） | 必须 |
+| 派生数据 | `plans/board-v{N}.md`、`plans/dependency-graph-v{N}.md`（+ 同版本旧文件重渲染） | 必须（由新计划重新生成，**不允许遗漏**） |
+
+- 纯计划类 CR（不动需求）从集合中剔除两个需求文件，其余不变。
+- **实际清单如何生成**：`change-apply` 在 `Transaction.begin` 前按 CR 内容
+  （是否含 `requirement_change`、有无旧计划、当前 `current_plan_version`）
+  生成显式文件清单写入 `journal.json`；每条含 `path` + `action`
+  （create / replace / append / delete-derived）+ `existed_before`。
+- **`begin` 前置检查**：①清单内路径无重复（同一文件出现两次 → 拒绝）；
+  ②每条路径的父目录存在或可创建；③按 `action` 校验文件类型与当前状态
+  （如 `replace` 要求目标存在、`create` 要求目标不存在）；④staging digest 重算通过。
+- **回滚如何恢复"原本不存在"的文件**：快照记录 `existed_before`；
+  rollback 时—— existed_before=true → 按快照内容恢复；existed_before=false → **删除该文件**
+  （而不是留一个空文件）。派生文件 rollback 后统一按旧计划重渲染，保证与旧计划一致。
+
+**提交顺序**（编号即动作，指针切换仍只在第 7 步）：
+
+| 序 | 动作 |
+| --- | --- |
+| 0 | 全部校验（含清单生成、digest 重算）；失败直接返回，不写任何文件 |
+| 1 | `Transaction.begin`：快照 Commit Set 全部文件，写 `journal.json` |
+| 2–6 | 写新版追踪表 / 基准文档 / 追加 baselines.json / 激活新计划 / 旧计划 superseded |
+| 7 | **切换正式指针** `requirements/traceability.json` |
+| 8 | 更新 `project.json` |
+| 9 | 关闭 CR |
+| 10 | 重渲染派生数据（看板 + 依赖图） |
+| 11 | journal 置 `committed`，移除事务进行中标记（见下） |
+
+#### 5b. 并发读取一致性：事务标记 + 统一读取守卫（选定方案）
+
+**先承认事实**：现有 `Transaction` 只保证**写入快照回滚**（异常时把文件恢复到 begin 前），
+**不提供任何并发读取原子性**。读命令不持锁，在第 2–10 步之间可能读到中间态
+（例如"新指针 + 旧 project"）。上一版写的"要么全切、要么全不切"只对**崩溃后的最终状态**成立，
+对**运行中的并发读者**不成立——这个矛盾由本节方案解决。
+
+**选定方案：事务标记 + 统一读取守卫**（备选的"读锁"和"不可变版本目录 + 原子指针"
+被否决：前者要求给全部读命令引入共享锁，跨平台文件锁语义复杂；后者需要重构全部读取路径）。
+
+**机制（待实现）**：
+
+1. `change-apply` 在**写锁内、任何写盘之前**创建标记 `.devflow/.txn/<id>/OPEN`；
+   journal 置 `committed` **后**最后一步删除标记。
+2. **所有读取正式项目数据的 CLI 入口**在读取前检查标记：
+   `status` / `next` / `task` / `board` / `graph` / `validate` / `doctor` / `self-test` /
+   `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` /
+   `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-*` /
+   `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` /
+   `dependency_check` / 示例项目的读路径——**一个不漏**；只读 `staging`、锁文件、
+   事务自身文件的路径（`recover`、`change-stage`）例外。
+3. 读到 OPEN 标记 → 拒绝执行（退出码非 0），提示"项目正在提交变更，请稍后重试或先 recover"；
+   不等待（避免读命令长阻塞）。写命令（`MUTATING_COMMANDS`）因已持写锁天然互斥，无需额外处理。
+4. **顺序不变式**：写锁 → OPEN 标记 → 写盘 → journal committed → 删标记；
+   读者侧：检查标记 → 读取。标记检查与文件读取之间不需要锁——因为删除标记是
+   提交的**最后一步**，看到"无标记"的读者必然面对已提交完的文件集合。
+5. **异常退出**：进程崩溃后 OPEN 标记残留 → 所有读命令持续拒绝；只有 `df.py recover --apply`
+   （回滚到快照并删除标记）或 `recover --complete`（确认 committed 后清标记）能解除。
+   `doctor` 报告残留事务。**崩溃后必须先 recover，再开放读取**。
+6. **并发读者行为**：提交期间到达的读者全部被拒（不观察中间态）；
+   提交成功后读者读到新状态；回滚后读者读到旧状态。
+
+**当前实现**：以上均**未实现**。现状只有写锁互斥写者，读命令不检查任何事务状态——
+在收口前，`change-apply` 期间并发读仍可能观察中间态，这必须在实现读守卫之前
+靠运维约定（提交期间不跑读命令）缓解。
 
 #### 6. 失败与回滚
 
 - 第 0 步失败：什么都没写，staging 保留，CR 仍 `confirmed`，可修复后重试。
-- 第 1–10 步任一失败：`Transaction.rollback` 按快照恢复全部文件（含指针与 project）；
-  CR 回到 `confirmed`，`applied_at` 不写。
-- 进程被 kill：journal 停在 open → `df.py recover --apply` 回滚；`doctor` 会报未完成事务。
+- 第 1–10 步任一失败：`Transaction.rollback` 按 `existed_before` 恢复文件集合
+  （existed_before=true 按快照恢复；false 删除），CR 回到 `confirmed`，`applied_at` 不写；
+  rollback 完成后删除 OPEN 标记（§5b），重新开放读取。
+- 进程被 kill：journal 停在 open、OPEN 标记残留 → **所有读命令持续拒绝**；
+  `df.py recover --apply` 回滚并清标记；`doctor` 报告残留事务。
 - **不允许**"指针切了但 project 没更新"这种半提交在无人干预下长期存在。
 
 #### 7. 回归/发布证据何时失效
@@ -148,8 +237,11 @@ baseline_id           = sha256("v{N}|" + traceability_digest + "|" + confirmed_d
 
 #### 8. 明确边界
 
-SHA-256 证明"内容与摘要一致"，**不证明**"这份内容经过谁确认"。确认动作的可信度来自
-`confirmed_by` + 项目锁 + 审计记录，不来自哈希。
+SHA-256 证明"内容与摘要一致"，**不证明**"这份内容经过谁确认"——它没有密钥绑定，
+任何人可重算，不是签名。`confirmed_by` / `--by` 只是操作者**声明**，CLI 不做身份验证；
+`ProjectLock` 只防并发交错。**确认动作的可信度只能来自外部审批锚点**（签名审批文件 /
+外部审批系统 / CI review，production 目标见 §3）；没有锚点的部署只能防误操作，
+不能防恶意操作者。
 
 **对应**：INV-002 / INV-003 / INV-020 / INV-029；风险 A2 / A3 / A6；待实现。
 

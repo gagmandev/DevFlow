@@ -84,10 +84,12 @@ erDiagram
 | G7 交付报告 | `releases/release-report.md`（旧版复制到 `history/`）+ `releases/release-report.json` + `project.json`（status=`release_candidate`） | `cmd_release`：`shutil.copy2` → `atomic_write_text` → `atomic_write_json` → `project.save`（`df.py:2409-2437`） | ❌ 无事务，共 4 次写 | 报告与元信息/状态可能不一致 |
 | G8 交付验收 | `project.json`（status=`release_ready` / `accepted` + 时间戳/验收人） | `cmd_release_ready` / `cmd_release_accept`：单次 `project.save` | ✅ 单文件写（无需事务） | — |
 
-**目标扩展（D-02，待实现）**：G1 在"含需求变更的 CR"场景下扩展到 9 个文件——
-新版 `traceability-vN.json`、正式指针 `traceability.json`、`baselines.json`、
-新版 `confirmed-requirements-vN.md`、`project.json`、新计划、旧计划、CR、看板/依赖图。
-提交顺序与回滚见 `08-decisions-required.md` D-02 §5。
+**目标扩展（D-02，待实现）**：G1 在"含需求变更的 CR"场景下扩展为
+**「需求变更原子提交文件集合」**——核心状态文件 9 个（新版 `traceability-vN.json`、
+正式指针 `traceability.json`、`baselines.json`、新版 `confirmed-requirements-vN.md`、
+`project.json`、新计划、旧计划（可选）、CR、事务 journal）+ 派生文件（看板、依赖图，
+必须重渲染）。清单生成、`begin` 前置检查与回滚语义见 `08-decisions-required.md` D-02 §5；
+**事务只保证写回滚，并发读一致性由事务标记 + 统一读取守卫保证（D-02 §5b），是另一个机制**。
 
 **结论修正**：
 

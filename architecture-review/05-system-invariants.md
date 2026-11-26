@@ -63,7 +63,7 @@
 
 | ID | 规则 | 适用范围 | 强制执行位置 | 验证方法 | 当前实现 | 现存风险 | 级别 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| INV-017 | 多文件状态变更必须原子（全成或可回滚） | 计划激活、需求切换、回归导入、交付报告 | **当前只有** `cmd_change_apply` 使用 `Transaction`（`dfcore.py:781`、`df.py:1706-1714`），且只覆盖 5 个文件；目标扩展为 9 个（含需求指针与 baseline，见 08 D-02 §5） | `test_p0_hardening.TransactionTest`（只测事务对象，未覆盖各命令） | 部分 | `plan-activate`（3 写）/`req-import`（2 写）/`release`（4 写）/`regression-import`（2 写 + 归档）/`accept`·`sync`·`start`（计划 + 看板）都**没有**事务（详见 02 §四） | P1 |
+| INV-017 | 多文件状态变更必须原子（全成或可回滚） | 计划激活、需求切换、回归导入、交付报告 | **当前只有** `cmd_change_apply` 使用 `Transaction`（`dfcore.py:781`、`df.py:1706-1714`），且只覆盖 5 个文件；目标扩展为「需求变更原子提交文件集合」（核心 9 + 派生 1，见 08 D-02 §5） | `test_p0_hardening.TransactionTest`（只测事务对象，未覆盖各命令） | 部分 | `plan-activate`（3 写）/`req-import`（2 写）/`release`（4 写）/`regression-import`（2 写 + 归档）/`accept`·`sync`·`start`（计划 + 看板）都**没有**事务（详见 02 §四）；且现有事务**只保证写回滚，不保证并发读原子**——读守卫目标见 08 D-02 §5b | P1 |
 | INV-018 | 历史版本不得被静默覆盖（计划、提示词、节点报告、回归报告、交付报告） | 全部历史 | `plan-import --force` 归档（`df.py:501`）、prompt 归档（`df.py:948`）、报告归档（`df.py:996`/`1819`）、release md 归档（`df.py:2409`） | `test_p1_workflow.PromptBindingTest`、`RegressionJsonTest` | 部分 | `req-import` 同版本覆盖无守卫（`df.py:423`）；`release-report.json` 无归档 | P1 |
 
 ## H. 回归与交付

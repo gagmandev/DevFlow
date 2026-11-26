@@ -23,6 +23,8 @@
 | `planned` 下 req-confirm 回退状态 | `df.py:434-437`、`df.py:466-467` | **无** | 06 节 A7、03 节 B10 |
 | 退役凭据的实际调用点 | `validate.py:297`、`df.py:1931`（仅两处） | `RegressionCoverageTest` | 05 节 INV-005 |
 | 事务实际使用点 | 仅 `df.py:1706`（`change-apply`） | `TransactionTest`（只测事务对象） | 02 节 §四 |
+| 事务只保证写回滚、无读原子 | `dfcore.py:781`（Transaction 无 OPEN/守卫概念）、读命令无标记检查 | **无** | 08 D-02 §5b、05 INV-017 |
+| `--by`/`confirmed_by` 无身份验证 | `--by` 直接入库（`change-set`/`release-accept` 等，CLI 无凭据核验） | **无** | 04 §5.5、08 D-02 §3 |
 | DAG 检环/依赖校验 | `dfcore.py:1390 find_cycles`、`validate.py:437-460` | `test_devflow.py:243 GraphTest` | `references/task-decomposition.md` |
 | 并行冲突判定（含通配符） | `dfcore.py:1629 parallel_issues`、`dfcore.py:1575 scope_overlap` | `test_v14_gates.py:200 WildcardScopeTest`、`test_p1_workflow.py:629` | `references/dependency-management.md` |
 | 并行例外需点名节点 | `dfcore.py:1620 _exception_covers`、`schemas/backlog.schema.json` | `test_v14_gates.py`（组级豁免被拒） | `SKILL.md` 7.1 |
@@ -104,7 +106,7 @@
 | 决策 | 唯一实现入口（目标） | 当前竞争路径（必须关闭） | 关闭方式 |
 | --- | --- | --- | --- |
 | D-01 计划激活 | v1：`plan-activate`（仅当从未激活）；v2+：`change-apply` | `plan-activate` 可激活任意 draft（`df.py:587`）；`plan-import` 的 `based_on` 可空（`df.py:522`） | `plan-activate` 对 `version>1` 直接拒绝；`change-apply` 交叉校验 CR/版本/基准 |
-| D-02 需求切换 | `change-stage`（写 staging）+ `change-apply`（事务切换） | `req-import` 直写正式（`df.py:423`）、无状态门槛（`df.py:399`） | `req-import` 仅首次确认前可用；之后只写 staging |
+| D-02 需求切换 | `change-stage`（写 staging）+ `change-apply`（文件集合原子切换 + OPEN 标记） | `req-import` 直写正式（`df.py:423`）、无状态门槛（`df.py:399`）；读命令不检查事务状态 | `req-import` 仅首次确认前可用；读守卫覆盖全部读入口（08 D-02 §5b） |
 | D-03/09 并行隔离 | `plan-activate`/`change-apply` 校验 `isolation` 声明 | 共享工作区并行（无 worktree 声明也放行） | production 档位拒绝未声明隔离的并行组 |
 | D-04 ignored | `git_changes_since` + `release*` 门禁 | 现状完全不检测（`df.py` 无 `--ignored`） | production 默认 `deny` + allowlist（`path/purpose/approved_by`） |
 | D-05 证据 | `regression-import`（CI 结果）+ `release*` 校验 | Agent 自写 `test-report.json` 直接作为证据 | 生产要求 CI 绑定 `commit_sha` + `baseline_id` |

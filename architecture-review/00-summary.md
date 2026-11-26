@@ -147,7 +147,7 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 | 修订项 | 变化 |
 | --- | --- |
 | D-01 收紧 | 由「计划变更走 CR（可 `--replan` 留痕）」改为「**计划激活唯一入口**：v1 才允许 `plan-activate`，v2+ 只能 `change-apply`」；`plan-import` 只产草稿 |
-| D-02 扩充 | 补全 CR 需求变更的完整设计：staging 目录结构、manifest、双 digest → `baseline_id`、确认人、9 文件事务提交顺序、回滚、证据失效时机（08 D-02 §1–§8） |
+| D-02 扩充 | 补全 CR 需求变更的完整设计：staging 目录结构、manifest、双 digest → `baseline_id`、确认人、「需求变更原子提交文件集合」（核心 9 + 派生）、提交顺序、回滚、证据失效时机（08 D-02 §1–§8） |
 | D-04 定案 | production 默认 `deny`；例外需 allowlist（`path`+`purpose`+`approved_by`）；development 允许 `off` 但必须标 `non_production_verification` |
 | 状态机澄清 | 03 的 Project / Requirement / Plan 全部拆成「实际行为 / 风险 / 目标」三段；明确 `release` 当前只拒 `accepted`、`req-import` 的 reason/confirmed_by 目前**不是**导入期校验 |
 | 数量修正 | INV-015 的项目状态直接赋值修正为 **8 处**（`df.py:468/628/1080/1736/2006/2435/2594/2627`） |
@@ -157,4 +157,17 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 | 需求变更数据流 | 03 §二重写为「change-new → change-stage → 用户确认 → change-apply」，含 staging 数据流表、提交前置、失败恢复、指针切换点 |
 
 > 本轮仍只改 Markdown；未运行任何会改变项目状态的命令。所有目标功能（staging、baseline_id、
-> 9 文件事务、ignored deny、CI 证据绑定）均标注**待实现**。
+> 原子提交文件集合、ignored deny、CI 证据绑定）均标注**待实现**。
+
+
+---
+
+## 附：第四轮审查修订记录
+
+| 修订项 | 变化 |
+| --- | --- |
+| 身份信任边界 | 08 D-02 §3 与 04 §5.5 明确：`--by`/`confirmed_by` 只是审计声明，不是身份认证；ProjectLock 与 SHA-256 也不是；production 需外部审批锚点（签名审批文件 / 外部审批系统 / CI review），CLI 核验凭据后才写 `approval`；执行 Agent 不持凭据、对 CR/manifest/审批记录只读；无 OS 隔离时不能抵御恶意 Agent（防误操作 ≠ 防恶意） |
+| 并发读取一致性 | 08 D-02 §5b 选定「事务标记 + 统一读取守卫」：`change-apply` 写 OPEN 标记 → 全部读入口（列出约 25 个命令，不遗漏 validate/doctor/regression-check）检查标记，读到 OPEN 即拒绝；顺序不变式：写锁 → OPEN → 写盘 → committed → 删标记；崩溃后必须先 recover 再开放读取。明确现有 Transaction 只保证写回滚、不保证读原子 |
+| 文件集合口径 | "9 文件事务"改为「需求变更原子提交文件集合」：核心 9（含事务 journal，旧计划可选）+ 派生（看板 + 依赖图，必须重渲染）；补清单生成、begin 前置检查（路径重复/存在性/文件类型）、回滚按 `existed_before` 删除或恢复 |
+
+> 本轮仍只改 Markdown；未运行任何会改变项目状态的命令。读守卫、外部审批等目标功能均标**待实现**。
