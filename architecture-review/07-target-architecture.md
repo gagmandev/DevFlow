@@ -115,7 +115,7 @@
 - **现状（已核实）**：只有 `change-apply` 使用 `Transaction`；`plan-activate`、`req-import`、
   `release`、`regression-import`、`accept/sync/start` 都是"多次单文件原子写"（见 02 §四）。
 - **目标**：把 `Transaction` 提升为 `apply_multi(paths, name, files, mutate)`，覆盖：
-  - `change-apply`（**需求变更时扩展为「需求变更原子提交文件集合」**：核心 9 个 + 派生依赖图，含新版追踪表、指针、`baselines.json`、
+  - `change-apply`（**需求变更时扩展为「需求变更原子提交文件集合」**：数量由 CR 动态决定，含新版追踪表、指针、`baselines.json`、
     新版基准文档、`project.json`、新计划、旧计划、CR、看板与依赖图；清单生成 / 前置检查 /
     回滚语义见 08 D-02 §5）；
   - `plan-activate`（仅 v1；旧计划 + 新计划 + project + board）；
@@ -124,8 +124,11 @@
   - `accept`（计划 + 看板 + deliverables）。
 - **不覆盖** `req-import` 的正式写入：按 D-02，它已不再有"直接写正式"的权限（首次导入除外，
   首次导入只有两份文件，仍应走同一 `apply_multi`）。
-- **事务 ≠ 读原子**：`apply_multi` 仍只保证写回滚；并发读一致性由事务标记 +
-  统一读取守卫保证（08 D-02 §5b），两者是独立机制，必须一起实现。
+- **事务 ≠ 读原子，且读守卫 = 读写互斥**：`apply_multi` 只保证写回滚；并发读一致性由
+  **读写互斥**（所有读正式数据的命令取同一项目锁、持锁完成全部读取，取锁失败立即拒绝）
+  + **OPEN 崩溃标记**（残留时拒绝读取，仅 recover 可解除）保证（08 D-02 §5b）。
+  三个机制（写回滚 / 读写互斥 / OPEN 恢复）相互独立，必须一起实现；
+  `ProjectLock` 复用到读命令前需先做代码审计（见 §5b 实现约束）。
 - **代价**：中（要保证每个 mutate 幂等）。**收益**：中断不再留下"半套状态"。
 
 ### C8 报告完整性指纹（INV-018 / D3）

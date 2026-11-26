@@ -85,11 +85,14 @@ erDiagram
 | G8 交付验收 | `project.json`（status=`release_ready` / `accepted` + 时间戳/验收人） | `cmd_release_ready` / `cmd_release_accept`：单次 `project.save` | ✅ 单文件写（无需事务） | — |
 
 **目标扩展（D-02，待实现）**：G1 在"含需求变更的 CR"场景下扩展为
-**「需求变更原子提交文件集合」**——核心状态文件 9 个（新版 `traceability-vN.json`、
-正式指针 `traceability.json`、`baselines.json`、新版 `confirmed-requirements-vN.md`、
-`project.json`、新计划、旧计划（可选）、CR、事务 journal）+ 派生文件（看板、依赖图，
-必须重渲染）。清单生成、`begin` 前置检查与回滚语义见 `08-decisions-required.md` D-02 §5；
-**事务只保证写回滚，并发读一致性由事务标记 + 统一读取守卫保证（D-02 §5b），是另一个机制**。
+**「需求变更原子提交文件集合」（Commit Set）**——**业务文件数量由 CR 内容与项目状态
+动态决定，不使用固定数量口径**。集合分五类：核心状态文件（指针 / project / 新计划 / CR，
+所有 CR 必有）、条件性核心文件（新版追踪表 / 基准文档 / baselines.json 仅需求变更 CR；
+旧计划存在才纳入）、派生文件（看板 + 依赖图，所有 CR 必须重渲染）、事务元数据
+（journal）与事务快照（后两者是基础设施，不计入业务数量）。
+清单生成、`begin` 前置检查与回滚语义见 `08-decisions-required.md` D-02 §5；
+**事务只保证写回滚；并发读一致性由读写互斥（读者取同一项目锁）+ OPEN 崩溃标记保证
+（D-02 §5b），是另外的机制**。
 
 **结论修正**：
 

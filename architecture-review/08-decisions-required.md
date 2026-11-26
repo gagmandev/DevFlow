@@ -134,85 +134,153 @@ baseline_id           = sha256("v{N}|" + traceability_digest + "|" + confirmed_d
 
 #### 5. `change-apply` 的提交顺序与「需求变更原子提交文件集合」（目标）
 
-**命名**：不再称"9 文件事务"。含需求变更的 CR 实际涉及 **10 个文件**
-（9 个核心状态文件 + 1 个派生文件，见下），统一称
-**「需求变更原子提交文件集合」（Commit Set）**。
+**命名**：不再称"9 文件事务"，也**不使用任何固定数量口径**（"10 个文件"、"9+1"等一律废除）。
+统一称**「需求变更原子提交文件集合」（Commit Set）**。
+**业务文件数量由 CR 内容与当前项目状态动态决定**：有无旧计划、是否含需求变更，
+都会改变集合内容。
 
-**集合定义**：
+**集合的五个类别**：
 
-| 类别 | 文件 | 必须 / 可选 |
+| 类别 | 文件 | 纳入条件 |
 | --- | --- | --- |
-| 核心状态 | `requirements/traceability-v{N}.json`（新版追踪表） | 必须 |
-| 核心状态 | `requirements/confirmed-requirements-v{N}.md`（新版基准文档） | 必须（需求变更 CR） |
-| 核心状态 | `requirements/baselines.json`（基线清单，追加） | 必须（需求变更 CR） |
-| 核心状态 | `requirements/traceability.json`（正式指针） | 必须 |
-| 核心状态 | `project.json`（版本指针 / baseline / 生命周期状态） | 必须 |
-| 核心状态 | `plans/backlog-v{N}.json`（新计划置 active） | 必须 |
-| 核心状态 | `plans/backlog-v{Old}.json`（旧计划置 superseded） | 可选（首次应用无旧计划） |
-| 核心状态 | `changes/CR-xxx/change-request.json`（CR → applied） | 必须 |
-| 核心/事务 | `.devflow/.txn/<id>/journal.json`（事务日志，非项目数据） | 必须 |
-| 派生数据 | `plans/board-v{N}.md`、`plans/dependency-graph-v{N}.md`（+ 同版本旧文件重渲染） | 必须（由新计划重新生成，**不允许遗漏**） |
+| **核心状态文件** | `requirements/traceability.json`（正式指针）；`project.json`；`plans/backlog-v{N}.json`（新计划置 active）；`changes/CR-xxx/change-request.json`（CR → applied） | 所有 CR 都必须 |
+| **条件性核心文件** | `requirements/traceability-v{N}.json`（新版追踪表）；`requirements/confirmed-requirements-v{N}.md`（新版基准文档）；`requirements/baselines.json`（追加）；`plans/backlog-v{Old}.json`（旧计划置 superseded） | 仅需求变更 CR 纳入前三个；旧计划**存在才纳入**（首次应用无旧计划则没有这一项） |
+| **派生文件** | `plans/board-v{N}.md`、`plans/dependency-graph-v{N}.md`（+ 同版本旧文件重渲染） | 所有 CR 都必须，由提交后的计划重新生成，**不允许遗漏** |
+| **事务元数据** | `.devflow/.txn/<id>/journal.json`（清单 + phase + status） | 所有事务都有；属于**事务基础设施，不计入业务 Commit Set 数量** |
+| **事务快照** | `.devflow/.txn/<id>/snapshot/**`（begin 时的文件内容备份） | 所有事务都有；同上，不计入业务数量 |
 
-- 纯计划类 CR（不动需求）从集合中剔除两个需求文件，其余不变。
-- **实际清单如何生成**：`change-apply` 在 `Transaction.begin` 前按 CR 内容
-  （是否含 `requirement_change`、有无旧计划、当前 `current_plan_version`）
-  生成显式文件清单写入 `journal.json`；每条含 `path` + `action`
-  （create / replace / append / delete-derived）+ `existed_before`。
-- **`begin` 前置检查**：①清单内路径无重复（同一文件出现两次 → 拒绝）；
-  ②每条路径的父目录存在或可创建；③按 `action` 校验文件类型与当前状态
-  （如 `replace` 要求目标存在、`create` 要求目标不存在）；④staging digest 重算通过。
-- **回滚如何恢复"原本不存在"的文件**：快照记录 `existed_before`；
-  rollback 时—— existed_before=true → 按快照内容恢复；existed_before=false → **删除该文件**
-  （而不是留一个空文件）。派生文件 rollback 后统一按旧计划重渲染，保证与旧计划一致。
+**集合差异示例（仅为说明动态性，不是固定清单）**：
 
-**提交顺序**（编号即动作，指针切换仍只在第 7 步）：
+- 需求变更 CR + 已有旧计划：核心 4 + 条件性 4 + 派生 2 = **10 个业务文件**；
+- 纯计划 CR + 已有旧计划：核心 4 + 条件性 1（仅旧计划）+ 派生 2 = **7 个业务文件**；
+- 纯计划 CR + 首次应用（无旧计划）：**6 个业务文件**。
+- journal 与快照在以上每种情况下都存在，但**不计入**业务文件数量。
+
+**清单生成与校验**：
+
+- `change-apply` 在 `Transaction.begin` 前按 CR 内容（是否含 `requirement_change`、
+  `current_plan_version` 是否存在）生成**最终完整清单**写入 `journal.json`；
+  每条含 `path` + `action`（create / replace / append / delete-derived）+ `existed_before`。
+- **每个路径在清单中只能出现一次**；重复 → `begin` 前置检查拒绝。
+- 其余 `begin` 前置检查：父目录存在或可创建；按 `action` 校验目标当前状态
+  （`replace` 要求存在、`create` 要求不存在）；staging digest 重算通过。
+
+**回滚语义**：快照记录 `existed_before`——true → 按快照内容恢复；false → **删除该文件**
+（不留空文件）。**派生文件回滚后必须恢复到旧计划对应的状态**（按旧计划重渲染），
+不允许留新计划的看板。
+
+**提交顺序**（指针切换仍只在第 7 步）：
 
 | 序 | 动作 |
 | --- | --- |
 | 0 | 全部校验（含清单生成、digest 重算）；失败直接返回，不写任何文件 |
-| 1 | `Transaction.begin`：快照 Commit Set 全部文件，写 `journal.json` |
+| 1 | 获取项目写锁 → `Transaction.begin`：快照 Commit Set，写 journal，**创建 OPEN 标记**（§5b） |
 | 2–6 | 写新版追踪表 / 基准文档 / 追加 baselines.json / 激活新计划 / 旧计划 superseded |
 | 7 | **切换正式指针** `requirements/traceability.json` |
 | 8 | 更新 `project.json` |
 | 9 | 关闭 CR |
 | 10 | 重渲染派生数据（看板 + 依赖图） |
-| 11 | journal 置 `committed`，移除事务进行中标记（见下） |
+| 11 | journal 置 `committed` → **删除 OPEN 标记**（最后一步）→ 释放写锁 |
 
-#### 5b. 并发读取一致性：事务标记 + 统一读取守卫（选定方案）
+#### 5b. 并发读取一致性：读写互斥 + OPEN 崩溃标记（第五轮修订）
 
 **先承认事实**：现有 `Transaction` 只保证**写入快照回滚**（异常时把文件恢复到 begin 前），
-**不提供任何并发读取原子性**。读命令不持锁，在第 2–10 步之间可能读到中间态
-（例如"新指针 + 旧 project"）。上一版写的"要么全切、要么全不切"只对**崩溃后的最终状态**成立，
-对**运行中的并发读者**不成立——这个矛盾由本节方案解决。
+**不提供任何并发读取原子性**。第四轮的"检查 OPEN 后无需锁"结论**已被推翻**：
+读者检查完 OPEN、尚未读完文件时，写者可以完成整个事务并删除标记，
+读者随后读到新旧混合的数据（检查点与读取点之间的竞态窗口）。
+OPEN 标记**只能**充当崩溃残留的哨兵，**不能**保护已通过检查的读者。
 
-**选定方案：事务标记 + 统一读取守卫**（备选的"读锁"和"不可变版本目录 + 原子指针"
-被否决：前者要求给全部读命令引入共享锁，跨平台文件锁语义复杂；后者需要重构全部读取路径）。
+**选定方案：读者与写者使用同一互斥锁（读写互斥）**
 
-**机制（待实现）**：
+> 说明：这是**读写互斥**，不是"共享读锁"——读者之间也互斥（串行读）。
+> 读 durations 短、频率低，串行可接受；换来的是协议简单、与现有写锁同一机制。
 
-1. `change-apply` 在**写锁内、任何写盘之前**创建标记 `.devflow/.txn/<id>/OPEN`；
-   journal 置 `committed` **后**最后一步删除标记。
-2. **所有读取正式项目数据的 CLI 入口**在读取前检查标记：
-   `status` / `next` / `task` / `board` / `graph` / `validate` / `doctor` / `self-test` /
-   `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` /
-   `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-*` /
-   `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` /
-   `dependency_check` / 示例项目的读路径——**一个不漏**；只读 `staging`、锁文件、
-   事务自身文件的路径（`recover`、`change-stage`）例外。
-3. 读到 OPEN 标记 → 拒绝执行（退出码非 0），提示"项目正在提交变更，请稍后重试或先 recover"；
-   不等待（避免读命令长阻塞）。写命令（`MUTATING_COMMANDS`）因已持写锁天然互斥，无需额外处理。
-4. **顺序不变式**：写锁 → OPEN 标记 → 写盘 → journal committed → 删标记；
-   读者侧：检查标记 → 读取。标记检查与文件读取之间不需要锁——因为删除标记是
-   提交的**最后一步**，看到"无标记"的读者必然面对已提交完的文件集合。
-5. **异常退出**：进程崩溃后 OPEN 标记残留 → 所有读命令持续拒绝；只有 `df.py recover --apply`
-   （回滚到快照并删除标记）或 `recover --complete`（确认 committed 后清标记）能解除。
-   `doctor` 报告残留事务。**崩溃后必须先 recover，再开放读取**。
-6. **并发读者行为**：提交期间到达的读者全部被拒（不观察中间态）；
-   提交成功后读者读到新状态；回滚后读者读到旧状态。
+**写入端协议**（`change-apply` 等 `MUTATING_COMMANDS`）：
 
-**当前实现**：以上均**未实现**。现状只有写锁互斥写者，读命令不检查任何事务状态——
-在收口前，`change-apply` 期间并发读仍可能观察中间态，这必须在实现读守卫之前
-靠运维约定（提交期间不跑读命令）缓解。
+1. 获取项目写锁（现有 `project_lock`，独占）。
+2. 持锁期间完成**全部四件事**：创建 OPEN 标记 → 事务写入 → journal 置 `committed` →
+   删除 OPEN 标记。任何一步都不释放锁。
+3. 释放锁。
+
+**读取端协议**（所有读取正式项目数据的命令）：
+
+1. 读取任何正式数据（`project.json` / `backlog-vN.json` / `traceability*.json` /
+   节点报告 / 回归 / 交付）**之前**，先获取与写者相同的项目锁（同一互斥机制）。
+2. **获取失败（超时）→ 立即拒绝**，退出码非 0，提示"项目正在被修改或提交，请稍后重试"；
+   不无限等待。
+3. **在完成全部正式数据读取之前不释放锁**——锁必须覆盖"读 project + 读计划 + 读追踪表 +
+   读节点报告"的整个读取阶段，而不是单次文件读。
+4. 读取结束（含派生文件渲染完成）后释放锁。
+
+**OPEN 标记的双重角色**（保留，但不再是读保护的主力）：
+
+1. 正常提交：写者持锁完成全部步骤后删除标记；持锁的读者在提交期间根本进不来，
+   进入后看到的必然是 committed 后的完整状态。
+2. **崩溃残留**：进程被 kill 后写锁释放但 OPEN 残留 → 读者即使拿到锁，
+   检查 OPEN 发现残留也**必须拒绝**；只有 `df.py recover --apply`（回滚到快照并删标记）
+   或经过严格校验的 `recover --complete`（确认 journal=committed 后清标记）能解除。
+   **恢复完成前不开放正式读取**。读取顺序：取锁 → 检查 OPEN → 无残留才读。
+
+**顺序不变式**：
+
+```
+写者：  取写锁 → OPEN → 写盘 → committed → 删 OPEN → 释放锁
+读者：  取锁 → 检查 OPEN（残留则拒绝）→ 读取全部正式数据 → 释放锁
+恢复：  取锁 → 校验 journal → 回滚或确认 → 删 OPEN → 释放锁
+```
+
+**并发行为汇总**：
+
+| 场景 | 读者结果 |
+| --- | --- |
+| 写者持锁提交中 | 取锁失败 → 拒绝（不观察中间态） |
+| 提交已完成、标记已删 | 正常读到新状态 |
+| 事务已回滚 | 正常读到旧状态 |
+| 崩溃、OPEN 残留 | 取锁成功但检查 OPEN → 拒绝，直到 recover |
+
+**实现约束（必须如实记录，不得假设已支持）**：
+
+- 现有 `ProjectLock`（`dfcore.py`，每路径 `RLock` + OS 文件锁 + 重入深度）是为
+  **写命令**设计的独占锁。把它复用到读命令**尚未经过代码审计**：
+  ①读命令的超时拒绝路径需要在 `main()` 里对非 MUTATING 命令也调用 `project_lock`
+  （当前只对 MUTATING 加锁）；②锁文件以 `O_RDWR|O_CREAT` 打开，读命令复用是可行的，
+  但 Windows/macOS 的 `msvcrt`/`fcntl` 行为差异、重入深度与线程归属在"短持有 + 高频读"
+  场景下是否表现正确——**待代码审计**；③读者互斥导致读串行，若实测读延迟不可接受，
+  再评估按节点分桶锁等优化（不预先设计）。
+- 在完成审计前，本节协议是**目标设计**；当前实现只有写互斥，
+  并发读在提交期间可能观察中间态，只能靠运维约定缓解。
+
+**命令读取路径分类表**（P0-2：按实际读取内容分类，**不按命令名猜测**）：
+
+| 类型 | 判定标准 | 锁协议 | 命令 |
+| --- | --- | --- | --- |
+| 只读 staging | 只读 `changes/*/staging/**` 与锁/事务自身文件 | 不需要正式数据读取锁 | `change-stage` 的 staging 写入部分（**但其基准计算需读正式数据，整体归下一类**） |
+| 读取正式状态 | 读 project / plan / requirements / 节点报告，不写 `.devflow` 正式文件 | 取锁 → 查 OPEN → 读 → 释放 | `status` / `next` / `task` / `validate` / `self-test`（见注 3） |
+| 读取 + 写派生 | 读正式状态，重渲染派生文件 | 取锁 → 查 OPEN → 读 → 写派生 → 释放 | `board` / `graph` / `doctor`（见注 1）/ `dependency-check` |
+| 读写正式状态 | 读 + 写正式文件 | 取**写**锁（`MUTATING_COMMANDS`，现有协议） | `init`（见注 2）/ `migrate` / `project-set` / `prompt-init` / `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-new` / `change-set` / **`change-stage`** / `change-apply` / `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` / `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` |
+| 事务恢复 | 读 journal / 快照 / OPEN，按恢复协议回滚或确认 | **独立恢复协议**（见注 4），不走普通读取路径 | `recover` |
+
+**注**：
+
+1. **`doctor`**：读正式数据（`validate_all` + 各项检查，`df.py:3328`）且 `_run_dependency_check`
+   会写依赖图（`df.py:3338`），但**不在 `MUTATING_COMMANDS` 里**——当前实现"读正式 + 写派生
+   却不加锁"，是一个已知的实现缺口（与 INV-025 一致）；目标归入"读取 + 写派生"类。
+2. **`init`**：创建 `.devflow` / 写 `.gitignore`、`decisions`，但不在 `MUTATING_COMMANDS`
+   （INV-025 已记录）；目标应纳入写锁协议。
+3. **`self-test`**：全部操作发生在 `tempfile.mkdtemp` 临时目录（`df.py:2730`），
+   与任何正式项目状态隔离，**不参与**本项目锁协议；若未来支持对既有项目跑 self-test，
+   必须重新分类。
+4. **`recover`**：在 `MUTATING_COMMANDS` 里（取写锁），但必须额外校验恢复状态
+   （journal phase / status）才能执行；`--complete` 只允许在 journal=committed 时清标记。
+5. **`change-stage`**：虽然名字含 stage，但它要读正式追踪表 / baseline / 计划版本来计算
+   `base_baseline_id` 与版本关系（D-02 §2），**整体归入"读写正式状态"**，必须取项目锁——
+   不能凭命令名豁免。
+6. 表中未列出的命令（含未来新增）默认按"最严格"处理：只要读取正式数据就纳入互斥协议；
+   是否有例外以本表 + 代码审计为准。
+
+**当前实现**：本节协议（读端取锁、OPEN、分类表中的目标归类）**均未实现**。
+现状：写命令有 `project_lock`；读命令不加锁、不检查事务状态；`doctor`/`init` 存在
+"读正式甚至写派生却不持锁"的缺口。收口前只能靠运维约定（提交期间不跑读命令）缓解。
 
 #### 6. 失败与回滚
 

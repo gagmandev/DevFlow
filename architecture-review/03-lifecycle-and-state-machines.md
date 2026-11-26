@@ -58,7 +58,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | 提议 | `changes/CR-xxx/staging/**` + `manifest.json` | ❌ 不变 | 主控 |
 | 确认 | CR `requirement_change` + `staging_manifest_sha256` | ❌ 不变 | **用户**（`--by`） |
-| 提交 | 见 08 D-02 §5 的「需求变更原子提交文件集合」（核心 9 + 派生） | ✅ 事务内全量切换；并发读者由事务标记 + 读守卫拒绝（§5b） | 主控执行 `change-apply` |
+| 提交 | 见 08 D-02 §5 的「需求变更原子提交文件集合」（数量由 CR 动态决定） | ✅ 事务内全量切换；并发读者被读写互斥挡在门外、OPEN 残留时拒绝（§5b） | 主控执行 `change-apply` |
 
 **提交前置（必须全部满足）**：
 - CR `confirmed`；`base_plan_version` / `base_requirement_version` == 当前指针；

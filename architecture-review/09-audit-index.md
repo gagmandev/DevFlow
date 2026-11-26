@@ -23,7 +23,10 @@
 | `planned` 下 req-confirm 回退状态 | `df.py:434-437`、`df.py:466-467` | **无** | 06 节 A7、03 节 B10 |
 | 退役凭据的实际调用点 | `validate.py:297`、`df.py:1931`（仅两处） | `RegressionCoverageTest` | 05 节 INV-005 |
 | 事务实际使用点 | 仅 `df.py:1706`（`change-apply`） | `TransactionTest`（只测事务对象） | 02 节 §四 |
-| 事务只保证写回滚、无读原子 | `dfcore.py:781`（Transaction 无 OPEN/守卫概念）、读命令无标记检查 | **无** | 08 D-02 §5b、05 INV-017 |
+| 事务只保证写回滚、无读原子 | `dfcore.py:781`（Transaction 无 OPEN/锁概念）、读命令不取锁 | **无** | 08 D-02 §5b、05 INV-017、04 §5.6 |
+| OPEN 检查后无需锁的结论已撤销 | 第四轮 §5b 的推论存在检查点↔读取点竞态窗口；第五轮改为读写互斥 | 本结论为本轮新增（静态推导） | 08 D-02 §5b |
+| 读命令复用 ProjectLock 待代码审计 | 现锁为写命令设计（`dfcore.py` RLock+OS 锁）；`main()` 只对 MUTATING 加锁；超时拒绝路径、跨平台行为、读串行化未验证 | **无**（待实现） | 08 D-02 §5b 实现约束 |
+| 命令读取路径分类 | `doctor` 读正式+写依赖图（`df.py:3328/3338`）但不在 MUTATING；`init` 写 `.devflow` 不在 MUTATING；`self-test` 全程 `tempfile.mkdtemp`（`df.py:2730`）隔离；`change-stage` 需读正式基准（待实现，归读写类）；`recover` 有独立协议（`df.py` cmd_recover 读 journal/phase） | `test_p0_hardening.LockTest`（覆盖写锁） | 08 D-02 §5b 分类表、04 §5.6 |
 | `--by`/`confirmed_by` 无身份验证 | `--by` 直接入库（`change-set`/`release-accept` 等，CLI 无凭据核验） | **无** | 04 §5.5、08 D-02 §3 |
 | DAG 检环/依赖校验 | `dfcore.py:1390 find_cycles`、`validate.py:437-460` | `test_devflow.py:243 GraphTest` | `references/task-decomposition.md` |
 | 并行冲突判定（含通配符） | `dfcore.py:1629 parallel_issues`、`dfcore.py:1575 scope_overlap` | `test_v14_gates.py:200 WildcardScopeTest`、`test_p1_workflow.py:629` | `references/dependency-management.md` |
@@ -106,7 +109,7 @@
 | 决策 | 唯一实现入口（目标） | 当前竞争路径（必须关闭） | 关闭方式 |
 | --- | --- | --- | --- |
 | D-01 计划激活 | v1：`plan-activate`（仅当从未激活）；v2+：`change-apply` | `plan-activate` 可激活任意 draft（`df.py:587`）；`plan-import` 的 `based_on` 可空（`df.py:522`） | `plan-activate` 对 `version>1` 直接拒绝；`change-apply` 交叉校验 CR/版本/基准 |
-| D-02 需求切换 | `change-stage`（写 staging）+ `change-apply`（文件集合原子切换 + OPEN 标记） | `req-import` 直写正式（`df.py:423`）、无状态门槛（`df.py:399`）；读命令不检查事务状态 | `req-import` 仅首次确认前可用；读守卫覆盖全部读入口（08 D-02 §5b） |
+| D-02 需求切换 | `change-stage`（写 staging，但读正式基准须取锁）+ `change-apply`（Commit Set 原子切换 + OPEN 崩溃标记） | `req-import` 直写正式（`df.py:423`）、无状态门槛（`df.py:399`）；读命令不取锁不查 OPEN | `req-import` 仅首次确认前可用；读写互斥覆盖全部读正式入口（08 D-02 §5b 分类表） |
 | D-03/09 并行隔离 | `plan-activate`/`change-apply` 校验 `isolation` 声明 | 共享工作区并行（无 worktree 声明也放行） | production 档位拒绝未声明隔离的并行组 |
 | D-04 ignored | `git_changes_since` + `release*` 门禁 | 现状完全不检测（`df.py` 无 `--ignored`） | production 默认 `deny` + allowlist（`path/purpose/approved_by`） |
 | D-05 证据 | `regression-import`（CI 结果）+ `release*` 校验 | Agent 自写 `test-report.json` 直接作为证据 | 生产要求 CI 绑定 `commit_sha` + `baseline_id` |
