@@ -736,9 +736,10 @@ def cmd_plan_activate(args) -> int:
     core.atomic_write_json(paths.backlog(version), plan)
 
     project.data["current_plan_version"] = version
-    project.data["current_requirement_version"] = plan.get(
-        "requirement_version", project.data.get("current_requirement_version")
-    )
+    if project.data.get("current_requirement_version") is None and (
+        paths.traceability.exists() or project.data.get("requirement_baseline") is not None
+    ):
+        project.data["current_requirement_version"] = plan.get("requirement_version")
     project.save()
 
     refresh(project, plan)
@@ -1758,6 +1759,9 @@ def cmd_change_apply(args) -> int:
     # 不能因为 0 是 falsy 就跳过检查（否则等于给过期基准开后门）。
     current_plan_version = project.data.get("current_plan_version")
     current_req_version = project.data.get("current_requirement_version")
+    effective_req_version = current_req_version
+    if effective_req_version is None and current_plan_version:
+        effective_req_version = core.load_json(paths.backlog(current_plan_version)).get("requirement_version")
     base_plan = cr.get("base_plan_version")
     base_req = cr.get("base_requirement_version")
     # 当前没有计划时按 0 处理，不能让 None 悄悄跳过基准检查
@@ -1767,10 +1771,10 @@ def cmd_change_apply(args) -> int:
             f"{args.change} 基于计划 v{base_plan}，当前生效计划已是 v{current_plan_version}。\n"
             "基准已过期：必须基于新计划重新评估影响，不能直接套用旧结论。"
         )
-    if base_req is not None and current_req_version is not None and \
-            str(base_req) != str(current_req_version):
+    if base_req is not None and effective_req_version is not None and \
+            str(base_req) != str(effective_req_version):
         raise DevFlowError(
-            f"{args.change} 基于需求 v{base_req}，当前需求已是 v{current_req_version}。\n"
+            f"{args.change} 基于需求 v{base_req}，当前需求已是 v{effective_req_version}。\n"
             "基准已过期：重新评估后再应用。"
         )
 
@@ -2383,7 +2387,8 @@ def delivery_blockers(
         if proj_rv is not None else None
     )
     has_req_baseline = bool(
-        recorded_baseline is not None
+        proj_rv is not None
+        or recorded_baseline is not None
         or traceability is not None
         or (versioned_proj_trace is not None and versioned_proj_trace.exists())
     )

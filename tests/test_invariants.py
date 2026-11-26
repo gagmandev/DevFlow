@@ -546,6 +546,55 @@ class TestInv029AndInv005RequirementsAndDelivery(unittest.TestCase):
         finally:
             p.close()
 
+    def test_inv_029_legacy_current_req_version_without_traceability_or_baseline_blocks(self):
+        """旧项目仅保留 current_requirement_version=1 与确认文档、双追踪表与 baseline 均缺失时，交付必须阻断。"""
+        p = Project()
+        try:
+            _write_valid_req_doc(p, 1)
+            p.import_plan([node("DF-001")])
+            p.activate()
+            self.assertEqual(complete_node(p)[0], 0)
+            self.assertEqual(p.run("regression-check")[0], 0)
+            reg_path = Path(tempfile.mkdtemp()) / "reg.json"
+            reg_path.write_text(json.dumps(regression_payload(), ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(p.run("regression-import", "--file", str(reg_path))[0], 0)
+
+            # 模拟旧项目：有 current_requirement_version=1 和 confirmed-requirements-v1.md，
+            # 但没有 requirement_baseline、traceability.json、traceability-v1.json
+            proj = core.load_json(p.paths.project)
+            proj["current_requirement_version"] = 1
+            proj.pop("requirement_baseline", None)
+            core.atomic_write_json(p.paths.project, proj)
+            self.assertFalse(p.paths.traceability.exists())
+            self.assertFalse((p.paths.requirements / "traceability-v1.json").exists())
+
+            # release 阻断且状态保持 regression
+            code, out = p.run("release")
+            self.assertEqual(code, 1, out)
+            self.assertIn("requirement_baseline", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "regression")
+
+            # release-ready 阻断且状态保持 regression
+            code, out = p.run("release-ready")
+            self.assertEqual(code, 2, out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "regression")
+
+            # release-accept 阻断且状态保持 regression
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 2, out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "regression")
+
+            # 即使强行置为 release_ready，release-accept 仍必须被 delivery_blockers 拦截
+            proj = core.load_json(p.paths.project)
+            proj["status"] = "release_ready"
+            core.atomic_write_json(p.paths.project, proj)
+            code, out = p.run("release-accept", "--by", "tester")
+            self.assertEqual(code, 1, out)
+            self.assertIn("requirement_baseline", out)
+            self.assertEqual(core.load_json(p.paths.project)["status"], "release_ready")
+        finally:
+            p.close()
+
     def test_inv_029_legacy_project_without_baseline_blocks_delivery_and_plain_migrate(self):
         """旧项目有追踪表与确认文档但缺 requirement_baseline 时，必须 fail-closed 且普通 migrate 不得静默生成。"""
         p = Project()
