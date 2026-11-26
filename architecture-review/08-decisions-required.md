@@ -250,37 +250,92 @@ OPEN 标记**只能**充当崩溃残留的哨兵，**不能**保护已通过检�
 - 在完成审计前，本节协议是**目标设计**；当前实现只有写互斥，
   并发读在提交期间可能观察中间态，只能靠运维约定缓解。
 
-**命令读取路径分类表**（P0-2：按实际读取内容分类，**不按命令名猜测**）：
+**命令读取路径分类表**（第六轮修订：按**实际读取与写入内容**分类，命令名与
+CLI parser 逐一核对——parser 共注册 **33** 个命令，本表覆盖全部 33 个，无虚构、无遗漏；
+未确认行为标"待代码审计"）：
 
-| 类型 | 判定标准 | 锁协议 | 命令 |
+| 类别 | 判定标准 | 锁协议 | 命令 |
 | --- | --- | --- | --- |
-| 只读 staging | 只读 `changes/*/staging/**` 与锁/事务自身文件 | 不需要正式数据读取锁 | `change-stage` 的 staging 写入部分（**但其基准计算需读正式数据，整体归下一类**） |
-| 读取正式状态 | 读 project / plan / requirements / 节点报告，不写 `.devflow` 正式文件 | 取锁 → 查 OPEN → 读 → 释放 | `status` / `next` / `task` / `validate` / `self-test`（见注 3） |
-| 读取 + 写派生 | 读正式状态，重渲染派生文件 | 取锁 → 查 OPEN → 读 → 写派生 → 释放 | `board` / `graph` / `doctor`（见注 1）/ `dependency-check` |
-| 读写正式状态 | 读 + 写正式文件 | 取**写**锁（`MUTATING_COMMANDS`，现有协议） | `init`（见注 2）/ `migrate` / `project-set` / `prompt-init` / `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-new` / `change-set` / **`change-stage`** / `change-apply` / `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` / `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` |
-| 事务恢复 | 读 journal / 快照 / OPEN，按恢复协议回滚或确认 | **独立恢复协议**（见注 4），不走普通读取路径 | `recover` |
+| **隔离临时项目** | 全程操作 `tempfile.mkdtemp` 临时目录，不读不写任何正式项目状态 | 不参与本项目锁协议 | `self-test`（注 1） |
+| **读取正式状态** | 读 project / plan / requirements / 节点报告；不写 `.devflow` 任何文件 | 取锁 → 查 OPEN → 读 → 释放 | `status` / `next` / `task` / `validate` |
+| **读正式状态 + 写派生** | 读正式状态，重渲染看板/依赖图等派生文件 | 取锁 → 查 OPEN → 读 → 写派生 → 释放 | `board` / `graph` / `doctor`（注 2） |
+| **读正式状态 + 写 staging** | 读完整正式基准（追踪表 / baseline / 计划版本），计算 staging 基准信息；只写 `changes/*/staging/**`，**不修改正式状态** | 取锁（与正式写者同一互斥锁）→ 查 OPEN → 读完整正式基准 → 生成 staging → **完成后释放锁** | `change-stage`（注 3，待实现） |
+| **事务性修改正式状态** | 多文件正式写入，需要 OPEN + journal + Transaction 崩溃恢复 | 取**写**锁 → OPEN → 事务写入 → committed → 删 OPEN → 释放 | `change-apply`（当前唯一；见「OPEN + journal 适用范围」） |
+| **非事务写正式状态** | 读 + 写正式文件，但当前未纳入 Transaction，**只有锁互斥、无崩溃恢复** | 取**写**锁（`MUTATING_COMMANDS`，现有协议）；崩溃后可能留下部分写入，恢复依赖 `doctor` + 人工 | `init`（注 4，首次初始化锁）/ `migrate` / `project-set` / `prompt-init` / `req-import` / `req-confirm` / `plan-import` / `plan-activate` / `change-new` / `change-set` / `start` / `sync` / `accept` / `retry` / `block` / `fail` / `cancel` / `supersede` / `regression-check` / `regression-import` / `release` / `release-ready` / `release-accept` |
+| **事务恢复** | 读 journal / 快照 / OPEN，按恢复协议回滚或确认 | **独立恢复协议**（注 5），不走普通读取路径 | `recover` |
+
+> `scripts/dependency_check.py` 是**内部模块**（被 `doctor` / `validate` 内部调用，
+> `df.py:3338`），**不是 CLI 命令**——parser 里没有 `dependency-check`，本表不再列出。
 
 **注**：
 
-1. **`doctor`**：读正式数据（`validate_all` + 各项检查，`df.py:3328`）且 `_run_dependency_check`
-   会写依赖图（`df.py:3338`），但**不在 `MUTATING_COMMANDS` 里**——当前实现"读正式 + 写派生
-   却不加锁"，是一个已知的实现缺口（与 INV-025 一致）；目标归入"读取 + 写派生"类。
-2. **`init`**：创建 `.devflow` / 写 `.gitignore`、`decisions`，但不在 `MUTATING_COMMANDS`
-   （INV-025 已记录）；目标应纳入写锁协议。
-3. **`self-test`**：全部操作发生在 `tempfile.mkdtemp` 临时目录（`df.py:2730`），
-   与任何正式项目状态隔离，**不参与**本项目锁协议；若未来支持对既有项目跑 self-test，
-   必须重新分类。
-4. **`recover`**：在 `MUTATING_COMMANDS` 里（取写锁），但必须额外校验恢复状态
-   （journal phase / status）才能执行；`--complete` 只允许在 journal=committed 时清标记。
-5. **`change-stage`**：虽然名字含 stage，但它要读正式追踪表 / baseline / 计划版本来计算
-   `base_baseline_id` 与版本关系（D-02 §2），**整体归入"读写正式状态"**，必须取项目锁——
-   不能凭命令名豁免。
-6. 表中未列出的命令（含未来新增）默认按"最严格"处理：只要读取正式数据就纳入互斥协议；
-   是否有例外以本表 + 代码审计为准。
+1. **`self-test`**：全部操作发生在 `tempfile.mkdtemp` 临时目录（`df.py:2730`），与任何正式
+   项目状态隔离，**当前不读取、不修改正式项目数据**，因此不参与本项目锁协议、不列入
+   "读取正式状态"类。**若未来支持对既有项目执行 self-test，必须重新进行锁协议分类**。
+2. **`doctor`**：读正式数据（`validate_all` + 各项检查，`df.py:3328`）且内部模块
+   `dependency_check` 会写依赖图（`df.py:3338`），但**不在 `MUTATING_COMMANDS` 里**——
+   当前实现"读正式 + 写派生却不加锁"，是已知实现缺口（与 INV-025 一致）；
+   目标归入"读正式状态 + 写派生"类。
+3. **`change-stage` 与 `change-apply` 的职责边界**：`change-stage` = **读正式状态 + 写 staging**
+   （读取期间必须持有与正式写者相同的互斥锁——staging 虽不是正式状态写入，但读取正式基准
+   需要一致的快照视图，不能凭命令名豁免）；`change-apply` = **事务性修改正式状态**
+   （唯一使用 OPEN + journal + Transaction 的命令）。两者都不直接改正式状态的部分分别
+   是"零"（stage 只写 staging）与"事务内"（apply 的正式修改全在 Commit Set 内）。
+4. **`init` 与首次初始化锁**：`init` 创建 `.devflow` 本身，而现有 `ProjectLock` 的锁文件
+   在 `.devflow/.lock`——**锁位置不能依赖尚未创建的目录**。目标约束：
+   ①首次初始化必须在创建 `.devflow` **之前**建立并取得"初始化互斥锁"；
+   ②锁文件位置独立于 `.devflow`（候选：项目根的固定文件，具体位置、跨平台实现
+   （`fcntl`/`msvcrt`）与初始化完成后锁文件的生命周期（保留/删除/迁移入 `.devflow`）
+   ——**待实现设计 + 代码审计**，不得假定现有 `ProjectLock` 已支持）；
+   ③并发 `init` 必须串行化（同一项目不能同时初始化）；
+   ④初始化过程必须持锁直到项目基础状态完整写入。
+   **两个锁要区分**：已初始化项目的普通写锁（现有 `project_lock`）vs
+   尚未初始化项目的首次初始化锁（待设计）。`init` 当前不在 `MUTATING_COMMANDS`
+   （INV-025 已记录）。
+5. **`recover`**：在 `MUTATING_COMMANDS` 里（取写锁），但必须额外校验恢复状态
+   （journal phase / status）才能执行；`--apply` 回滚到快照并删 OPEN；
+   `--complete` 只允许在 journal=committed 时清标记。它不走普通读取/写入路径。
+6. parser 实际注册 **33** 个命令（`accept/block/board/cancel/change-apply/change-new/
+   change-set/doctor/fail/graph/init/migrate/next/plan-activate/plan-import/project-set/
+   prompt-init/recover/regression-check/regression-import/release/release-accept/
+   release-ready/req-confirm/req-import/retry/self-test/start/status/supersede/sync/task/
+   validate`），本表 7 类合计恰好覆盖 33 个。**未列出的未来新增命令默认按最严格处理**：
+   只要读取正式数据就纳入互斥协议；是否有例外以本表 + 代码审计为准。
 
-**当前实现**：本节协议（读端取锁、OPEN、分类表中的目标归类）**均未实现**。
-现状：写命令有 `project_lock`；读命令不加锁、不检查事务状态；`doctor`/`init` 存在
-"读正式甚至写派生却不持锁"的缺口。收口前只能靠运维约定（提交期间不跑读命令）缓解。
+**互斥锁 / 事务原子性 / 崩溃恢复：三个概念严格区分（第六轮新增）**
+
+| 概念 | 是什么 | 提供什么 | 不提供什么 |
+| --- | --- | --- | --- |
+| A. 互斥锁（`project_lock`） | 并发写交错防护 | 同一时刻只有一个写者 | ❌ 不等于事务原子性；❌ 不等于崩溃恢复 |
+| B. OPEN + journal（事务型写入） | 多文件写入的崩溃恢复机制 | 崩溃后 `recover` 回滚到 begin 前状态 | ❌ 不是所有写命令都有；❌ 不提供并发读原子（读原子靠 A + OPEN 哨兵） |
+| C. 非事务型写入 | 持锁但无 Transaction 的正式写入 | 只有互斥 | ❌ 崩溃后可能留下部分写入（如"旧计划已 superseded、project 未更新"），**不能声称具备崩溃恢复能力** |
+
+**「OPEN + journal」的适用范围（必须严格限定，不得推广到所有写命令）**：
+
+- **必须创建 OPEN + journal 的（事务型写入）**：当前只有 **`change-apply`**——
+  它提交「需求变更原子提交文件集合」（多文件、指针切换，部分写入不可接受）。
+- **目标应纳入事务但当前未纳入**（记录为后续实现阶段工作，当前崩溃后有部分写入风险，
+  风险清单见 `02-data-model.md` §四 G2–G7）：`plan-activate`（G2：旧计划/新计划/project/
+  看板，3+ 次写）、`req-import`（G3：2 写）、`release`（G7：4 写）、
+  `regression-import`（G6：2 写 + 归档）、`accept`（G4：计划 + 看板 + deliverables）。
+  这些命令在纳入事务之前，**不得被描述为"具备事务恢复能力"**。
+- **单文件写、无需事务**：`req-confirm` / `project-set` / `migrate`（单次 `project.save`）、
+  `change-new` / `change-set`（CR 目录内写入）、`prompt-init`、`release-ready` /
+  `release-accept`（单次 project.save + 派生输出）。它们持锁互斥即可，
+  崩溃风险限于单文件原子性（`atomic_write` 保证）。
+- **journal 生命周期**：`begin` 创建（phase=open）→ 写入过程中逐步更新 →
+  全部写完置 `status=committed` → 删 OPEN。崩溃后 journal 停在 open →
+  `recover --apply` 校验 phase 后回滚到快照并清 OPEN；journal=committed 但 OPEN 残留 →
+  `recover --complete` 校验后清标记。
+
+**结论一句话**：**互斥锁只能防止并发交错，不等于事务原子性，也不等于崩溃恢复能力。**
+事务原子性需要 OPEN + journal + Transaction（当前仅 `change-apply`）；
+崩溃恢复需要 recover 协议（校验 journal phase/status）；三者缺一不可、不可互相替代。
+
+**当前实现**：本节目标协议（读端取锁、OPEN、分类表中的目标归类、首次初始化锁）**均未实现**。
+现状：写命令有 `project_lock`（互斥，非事务）；只有 `change-apply` 用 Transaction；
+读命令不加锁、不检查 OPEN；`doctor`/`init` 存在"读正式甚至写派生却不持锁"的缺口；
+`self-test` 操作临时目录、天然隔离。收口前只能靠运维约定（提交期间不跑读命令）缓解。
 
 #### 6. 失败与回滚
 

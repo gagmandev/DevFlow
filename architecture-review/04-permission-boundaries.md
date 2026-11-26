@@ -183,7 +183,8 @@ CI approved review），CLI 核验"凭据 → 审批人 + CR id + staging manife
 | 写者互斥 | ✅ `MUTATING_COMMANDS` 统一取 `project_lock` | 保持 |
 | 读者互斥 | ❌ 读命令不取锁，事务提交期间可观察中间态 | 所有读正式数据的命令取**同一项目锁**（读写互斥，非共享读锁），持锁完成全部正式读取，取锁失败立即拒绝 |
 | 崩溃残留 | ❌ 无事务标记概念 | OPEN 标记残留时读者（即使持锁）仍拒绝；只有 `recover --apply` / 严格校验的 `recover --complete` 能解除，恢复前不开放正式读取 |
-| 已知实现缺口 | `doctor` 读正式数据且写依赖图、`init` 写 `.devflow`，都不在 `MUTATING_COMMANDS`（INV-025）；读命令复用 `ProjectLock` 的行为（超时拒绝、跨平台 `fcntl`/`msvcrt`、重入深度）**待代码审计** | 见 08 D-02 §5b 命令分类表 |
+| 事务范围 | ❌ 只有 `change-apply` 用 Transaction；`plan-activate` / `release` / `req-import` 等持锁但**无崩溃恢复**，崩溃可能留部分写入 | OPEN + journal 只属于事务型写入（当前仅 `change-apply`）；其余写命令不得声称具备崩溃恢复（08 D-02 §5b 三概念区分） |
+| 已知实现缺口 | `doctor` 读正式数据且写依赖图、`init` 写 `.devflow`，都不在 `MUTATING_COMMANDS`（INV-025）；`init` 的首次初始化锁（`.devflow` 尚不存在时锁放哪）待设计；读命令复用 `ProjectLock` 的行为（超时拒绝、跨平台 `fcntl`/`msvcrt`、重入深度）**待代码审计** | 见 08 D-02 §5b 命令分类表（`self-test` 因 mkdtemp 隔离单独成类，不属读正式命令） |
 
 > OPEN 标记不是读保护：第四轮"检查 OPEN 后无需锁"的结论已被撤销——
 > 检查点与读取点之间存在竞态窗口，只有读写互斥能挡住已通过检查的读者。

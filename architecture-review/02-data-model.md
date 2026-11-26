@@ -13,7 +13,7 @@
 | 澄清记录 | `.devflow/requirements/clarification.md` | 过程记录 | 自身 | 主控 | 否 |
 | 计划（各版本） | `.devflow/plans/backlog-vN.json` | **正式数据** | 自身 | `plan-import` / `plan-activate` / `start` / `sync` / `accept` / `change-apply` | 是 |
 | 看板 | `.devflow/plans/board-vN.md` | **派生** | `backlog-vN.json` | `render_board`（`refresh`） | 跟随计划版本 |
-| 依赖图 | `.devflow/plans/dependency-graph-vN.md` | **派生** | `backlog-vN.json` | `dependency_check --write` | 跟随计划版本 |
+| 依赖图 | `.devflow/plans/dependency-graph-vN.md` | **派生** | `backlog-vN.json` | 内部模块 `dependency_check.py`（由 `plan-import` / `doctor` 调用；非独立 CLI 命令） | 跟随计划版本 |
 | 变更申请 | `.devflow/changes/CR-xxx/change-request.json` | **正式数据** | 自身 | `change-new/set/apply` | 目录即版本 |
 | 需求变更暂存（目标） | `.devflow/changes/CR-xxx/staging/**`（traceability / 基准文档 / plan 草稿 / manifest） | **草稿（不参与正式读取）** | 自身 | `change-stage`（待实现） | 随 CR |
 | 需求基线清单（目标） | `.devflow/requirements/baselines.json` | **正式数据** | 自身 | `change-apply`（追加） | 只追加 |

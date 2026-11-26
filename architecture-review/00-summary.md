@@ -189,3 +189,18 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 > 本轮仍只改 Markdown；未运行任何代码测试。所有目标机制（读写互斥、OPEN、Commit Set、
 > 外部审批）均标注待实现；第四轮身份信任边界（`--by` 非认证、SHA-256 非签名、
 > production 需外部审批锚点、无 OS 隔离不能防恶意 Agent）完整保留。
+
+
+---
+
+## 附：第六轮审查修订记录（第一阶段收尾）
+
+| 修订项 | 变化 |
+| --- | --- |
+| self-test 分类 | 从"读取正式状态"移出，单独成"隔离临时项目"类（`tempfile.mkdtemp`，`df.py:2730`）；当前不读不写正式项目数据、不参与锁协议；未来支持既有项目时须重新分类 |
+| change-stage 分类 | 从"读写正式状态"改为独立类别**"读正式状态 + 写 staging"**：读完整正式基准期间持有与写者相同的互斥锁，只写 staging 不改正式状态；与 `change-apply`（事务性修改正式状态）职责边界明确 |
+| CLI 命令对齐 | 逐项核对 parser：实际注册 **33** 个命令；`dependency_check` 是内部模块**非 CLI 命令**（从分类表移除，02 同步修正）；表格 7 类合计覆盖 33 个，无虚构无遗漏 |
+| init 首次初始化锁 | 新增约束：锁文件位置不能依赖尚未创建的 `.devflow`；初始化前须先取得初始化互斥锁；并发 init 串行化；持锁至基础状态写完；具体位置/跨平台/生命周期**待实现设计 + 代码审计**；区分普通写锁与首次初始化锁 |
+| OPEN + journal 适用范围 | 严格三概念区分：互斥锁（防交错）≠ 事务原子性（OPEN+journal+Transaction，**当前仅 `change-apply`**）≠ 崩溃恢复（recover 校验 journal phase/status）；`plan-activate`/`release`/`req-import` 等记录为待纳入事务，纳入前不得声称具备崩溃恢复；`req-confirm`/`project-set`/`migrate` 等单文件写无需事务 |
+
+> 本轮仍只改 Markdown；未运行代码测试。第四轮身份信任边界与第五轮 Commit Set 动态集合设计完整保留。
