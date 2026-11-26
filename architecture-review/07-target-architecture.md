@@ -21,29 +21,37 @@
 
 ## 二、十项具体变更（现状 → 目标）
 
-### C1 计划版本变更必须可追溯（对应 INV-008）
+### C1 计划激活唯一入口：v1 用 `plan-activate`，v2+ 只能 `change-apply`
 
-- **现状**：`plan-import` 允许 `based_on` 为空；`plan-activate` 不校验来源。
+- **现状**：`plan-import` 允许 `based_on` 为空；`plan-activate` 不校验来源与版本，
+  任意 draft 计划都能直接生效。
 - **目标**（D-01）：
-  - `plan_version == 1`：允许无 `based_on`（首次）。
-  - `plan_version > 1`：`based_on.change_id` 必填，且该 CR 必须 `confirmed`；
-    `plan-activate` 校验 CR 存在且 `target_plan_version == version`。
-  - **不设 `--replan` 之类的独立通道**：影响交付基准的计划修改只能走 CR。
-  - 纯执行元数据（`owner`/`remark`/`stats_note`）允许就地修改，但写审计记录。
-  - 历史项目里无 `based_on` 的 v>1 计划：`migrate` 标 `legacy_plan_origin`，只读保留、不可再激活。
-- **代价**：低（校验 + schema 字段 + migrate 标记）。**收益**：堵住当前最大绕过。
+  - **v1**：`plan-activate` 允许，但仅当项目从未激活过计划（`current_plan_version is None`
+    且没有别的 active 计划）。
+  - **v2 及以后**：`plan-activate` **一律拒绝**（不是"补个 based_on 就放行"）；
+    唯一入口是 `change-apply`，它同时完成计划切换、旧计划 supersede、CR→applied。
+  - `change-apply` 必须交叉校验：CR `confirmed`、`plan.based_on.change_id == CR`、
+    `based_on.plan_version == CR.base_plan_version`、`plan.plan_version == CR.target_plan_version`、
+    CR 基准 == 项目当前指针、需求版本一致、`migration_problems` 为空、validate(activating) 通过。
+  - `plan-import` 仍可创建草稿（准备变更），但草稿不能绕过 `change-apply` 生效。
+  - 目标：只有 `dfstate` 能写 `plan.status=active` / `project.current_plan_version`。
+- **历史项目**：无 `based_on` 的 v>1 计划由 `migrate` 标 `legacy_plan_origin`，只读保留，不允许再激活。
+- **代价**：低（校验 + migrate 标记）。**收益**：堵住"无 CR 换计划"这条最大绕过。
 
 ### C2 需求基准内容指纹（INV-002 / INV-020）
 
 - **现状**：只校验存在/长度；`req-import` 可在任意状态改写追踪表。
-- **目标**（D-02，CLI 生成、双 digest + 版本清单）：
+- **目标**（D-02，CLI 生成双 digest + `baselines.json` + **CR staging**）：
   - `req-confirm` 计算 `traceability_digest`（结构化数组规范化哈希）与
     `confirmed_doc_digest`（文档全文哈希），合成 `baseline_id`；
   - 写入 `project.requirement_baseline`，并**追加**到 `requirements/baselines.json`（不可覆盖）；
   - 计划 / CR / 回归报告 / 交付报告元信息都写 `requirement_baseline_id`；
   - `regression-import`、`release-ready`、`release-accept` 重算并逐项比对；
-  - `req-import` 增加状态门槛与版本单调性校验（禁止在 `release_candidate`/`release_ready` 改写；
-    同版本重导需 `--force` + 归档）。
+  - `req-import` 的"写正式"能力只保留到**首次确认之前**；之后只能写 CR 的 staging
+    （`.devflow/changes/CR-xxx/staging/`），正式文件在 `change-apply` 前不变；
+  - `change-apply` 在**一个事务**内切换：新版追踪表 + 基准文档 + `baselines.json` +
+    正式指针 + `project.json` + 新/旧计划 + CR 状态 + 看板（完整顺序见 08 D-02 §5）；
+  - 版本必须单调（`to_version == current + 1`），禁止跳版/回退。
 - **代价**：中（新增字段 + 清单文件 + 多处比对 + 迁移）。**收益**：堵住"改文档/改状态不改版本"两条暗路。
 - **边界**：digest 只证明内容一致，不证明确认者身份（见 D-02 / D-05）。
 
@@ -67,10 +75,15 @@
 
 ### C5 ignored 文件策略（INV-011）
 
-- **状态：待定（D-04）**。三种方案（`allowlist` / `deny` / `off`）需要产品确认生产项目是否允许
-  交付依赖 ignored 配置；未定期间实现保持现状（不检测），但交付报告必须声明"ignored 文件未纳入范围校验"。
-- **候选实现**：`git.ignored_policy` 配置 + `node.ignored_allowlist`；`allowlist` 默认只允许构建产物目录。
-- **代价**：中（要处理 ignored 目录噪音）。**收益**：补上 `.env`/构建产物这类盲区。
+- **状态：已定（D-04）**。production 默认 `deny`。
+- **目标**：
+  - `production`：`git.ignored_policy = deny`；`git status --ignored --porcelain` 出现新增/修改即阻断；
+    例外必须写 `node.ignored_allowlist` / 项目级 allowlist，每条含 `path` + `purpose` + `approved_by`。
+  - `development`：允许 `off`，但项目档案标 `non_production_verification=true`，
+    看板与交付报告显示"未做 ignored 校验（非生产级）"。
+  - 配置错误（production 未开 deny）由 `doctor` 报错、`release-ready` 阻断；
+    **不允许**用"报告里声明没检测"代替门禁。
+- **代价**：中（处理 ignored 目录噪音，提供 allowlist 模板）。**收益**：补上 `.env`/构建产物这类盲区。
 - **注意**：这是 D-03/09 之外的另一条"真实变更"缺口，不能因为 worktree 落地就认为已解决。
 
 ### C6 项目状态迁移表（INV-015）
@@ -102,11 +115,14 @@
 - **现状（已核实）**：只有 `change-apply` 使用 `Transaction`；`plan-activate`、`req-import`、
   `release`、`regression-import`、`accept/sync/start` 都是"多次单文件原子写"（见 02 §四）。
 - **目标**：把 `Transaction` 提升为 `apply_multi(paths, name, files, mutate)`，覆盖：
-  - `plan-activate`（旧计划 + 新计划 + project + board）
-  - `req-import`（traceability-vN + 指针）
-  - `release`（md + json + project 状态）
-  - `regression-import`（json + md + 归档）
-  - `accept`（计划 + 看板 + deliverables）
+  - `change-apply`（**需求变更时扩展为 9 个文件**：新版追踪表、指针、`baselines.json`、
+    新版基准文档、`project.json`、新计划、旧计划、CR、看板/依赖图）；
+  - `plan-activate`（仅 v1；旧计划 + 新计划 + project + board）；
+  - `release`（md 归档 + md + json + project 状态）；
+  - `regression-import`（归档 + json + md）；
+  - `accept`（计划 + 看板 + deliverables）。
+- **不覆盖** `req-import` 的正式写入：按 D-02，它已不再有"直接写正式"的权限（首次导入除外，
+  首次导入只有两份文件，仍应走同一 `apply_multi`）。
 - **代价**：中（要保证每个 mutate 幂等）。**收益**：中断不再留下"半套状态"。
 
 ### C8 报告完整性指纹（INV-018 / D3）
@@ -164,22 +180,10 @@
 | 2 | INV-015 | C6 项目迁移表（含 D-06 语义） | 无 |
 | 3 | INV-002/003/020 | C2 需求双 digest + baselines 清单 | C3（指针校验） |
 | 4 | **INV-029** | 交付门禁重算 baseline + 退役凭据 | C2 |
-| 5 | INV-012 | C4 dirty 指纹 + D-04 ignored 策略 | D-04 决策 |
+| 5 | INV-011/012 | C4 dirty 指纹 + C5 ignored deny（production 默认） | D-04（已定） |
 | 6 | INV-023/024 | C9 CI 证据层级 + C8 报告指纹 | 外部 CI |
 | 7 | INV-017 | C7 统一事务 | C6 |
 | 8 | INV-010/011 | 资源别名 + worktree 隔离（生产必须） | C4 |
-
-## 四、不变量 → 目标强制点（实施顺序建议）
-
-| 优先级 | 不变量 | 目标机制 | 依赖 |
-| --- | --- | --- | --- |
-| 1 | INV-008 | C1 计划来源校验 | 无 |
-| 2 | INV-015 | C6 项目迁移表 | 无 |
-| 3 | INV-002/020 | C2 需求 digest | C3（指针校验） |
-| 4 | INV-012 | C4 dirty 指纹 + C5 ignored 策略 | 无 |
-| 5 | INV-018/023 | C8 报告指纹 + C9 证据分层 | 无 |
-| 6 | INV-017 | C7 统一事务 | C6 |
-| 7 | INV-010/011 | 资源别名 + worktree 隔离（可选） | C4 |
 
 ## 五、测试策略（与不变量一一对应）
 
@@ -209,4 +213,4 @@
 | 证据真实性 | Agent 自证 + 自洽校验 | Agent 自报=过程记录；生产用 CI 结果（绑 commit + baseline） | D-05 |
 | 并行隔离 | 同工作区 | 生产必须 worktree；未实现前只允许串行 | D-03 / D-09 |
 
-> 仍待定的决策（D-04 / D-07 / D-08 / D-10）见 `08-decisions-required.md`。
+> 仍待定的决策（D-07 / D-08 / D-10）见 `08-decisions-required.md`；D-01~D-06、D-09 已定案。

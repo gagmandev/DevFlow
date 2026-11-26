@@ -15,6 +15,8 @@
 | 看板 | `.devflow/plans/board-vN.md` | **派生** | `backlog-vN.json` | `render_board`（`refresh`） | 跟随计划版本 |
 | 依赖图 | `.devflow/plans/dependency-graph-vN.md` | **派生** | `backlog-vN.json` | `dependency_check --write` | 跟随计划版本 |
 | 变更申请 | `.devflow/changes/CR-xxx/change-request.json` | **正式数据** | 自身 | `change-new/set/apply` | 目录即版本 |
+| 需求变更暂存（目标） | `.devflow/changes/CR-xxx/staging/**`（traceability / 基准文档 / plan 草稿 / manifest） | **草稿（不参与正式读取）** | 自身 | `change-stage`（待实现） | 随 CR |
+| 需求基线清单（目标） | `.devflow/requirements/baselines.json` | **正式数据** | 自身 | `change-apply`（追加） | 只追加 |
 | 变更说明/影响评估 | `changes/CR-xxx/{change-request.md, impact-assessment.md}` | 人读报告 | JSON 为准 | 主控/Agent | 否 |
 | 提示词 | `.devflow/nodes/<ID>/prompt.md` | 正式输入 | 自身 + 版本元数据 | `prompt-init` | 是（`history/` + `prompt_version`） |
 | 执行报告 | `.devflow/nodes/<ID>/execution-report.md` | **证据** | 内含 `devflow-execution` JSON | **执行 Agent 直接写** | 返工时归档 `history/` |
@@ -61,6 +63,7 @@ erDiagram
 | `prompt_version` | 节点 + 提示词头 | `start` | `prompt_binding_problems`（`dfcore.py:1258`）五项比对 |
 | `attempt_id` | 节点 + 两份报告 | `sync`/`accept` | `_binding_problems`（`dfcore.py:1818`） |
 | `snapshot_id` | 回归报告 + `source-snapshot.json` | 交付 | `snapshot_problems`（`df.py:1844`） |
+| `baseline_id`（目标） | 根 `project.requirement_baseline`、`baselines.json`、计划、CR、回归、交付 | 全链路 | 目标：`change-apply` 写入，交付时逐项比对（当前**无此字段**） |
 | CR `change_id` | 目录 + JSON + 计划 `based_on` | `change-apply` | `df.py:1665-1685` |
 
 ## 四、必须原子一致的数据组（逐组核对写盘调用）
@@ -81,6 +84,11 @@ erDiagram
 | G7 交付报告 | `releases/release-report.md`（旧版复制到 `history/`）+ `releases/release-report.json` + `project.json`（status=`release_candidate`） | `cmd_release`：`shutil.copy2` → `atomic_write_text` → `atomic_write_json` → `project.save`（`df.py:2409-2437`） | ❌ 无事务，共 4 次写 | 报告与元信息/状态可能不一致 |
 | G8 交付验收 | `project.json`（status=`release_ready` / `accepted` + 时间戳/验收人） | `cmd_release_ready` / `cmd_release_accept`：单次 `project.save` | ✅ 单文件写（无需事务） | — |
 
+**目标扩展（D-02，待实现）**：G1 在"含需求变更的 CR"场景下扩展到 9 个文件——
+新版 `traceability-vN.json`、正式指针 `traceability.json`、`baselines.json`、
+新版 `confirmed-requirements-vN.md`、`project.json`、新计划、旧计划、CR、看板/依赖图。
+提交顺序与回滚见 `08-decisions-required.md` D-02 §5。
+
 **结论修正**：
 
 * 上一版把 `plan-activate` 也标为"走 Transaction"是**错误**的；事务只存在于 `change-apply`。
@@ -95,6 +103,7 @@ erDiagram
 | 计划内容/版本变化 | 旧提示词、旧回归、旧交付报告 | 部分：提示词 ✅（`prompt_binding_problems`）；回归 ✅（版本比对）；交付报告 ✅（`release_report_problems` 比对版本） |
 | 需求内容变化（同版本） | 回归、交付、节点证据 | ❌ 无内容指纹，只在版本号变化时失效（见 INV-020） |
 | 需求被标成 `deferred/removed/out_of_scope`（同版本） | 交付门禁对该需求的检查 | ❌ `delivery_blockers` 直接跳过非 active 需求（`df.py:2231-2232`），退役凭据也不在交付阶段校验（见 A6） |
+| `baseline_id` 变化（目标） | 旧回归、旧交付报告、受影响节点证据 | 目标：靠字段比对失效；当前无该字段（见 08 D-02 §7） |
 | 节点验收后交付物被改 | 下游 `start` 需重新评估 | ✅ `context_changes`（`dfcore.py:1106`） |
 | 契约文件被改 | 下游 `start` 需重新评估 | ✅ 同上（`deliverables.contracts`） |
 | 看板被手改 | 无 | ❌ 无哈希校验，只能靠重渲染覆盖 |
@@ -114,6 +123,9 @@ erDiagram
 - `req-confirm` 只检查文件存在 + 文本长度 ≥ 200 + 三个关键词（`df.py:435-448`）。
 - 之后任何人都可以改 `confirmed-requirements-v1.md` 内容而版本号不变；回归报告只绑定
   `requirement_version=1`，不会失效。
+- **Git 可见性要说清**：如果 `.devflow/` 已被提交，`git status`/`git diff` 本身**能看到**这个改动；
+  但 DevFlow 的变更检测 `git_changes_since` 显式过滤 `.devflow/`（`dfcore.py:996-1000`），
+  所以**流程不会消费**这条信息。两者不是一回事。
 - **这直接违反"正式需求基准只能通过变更流程修改"的设计目标**（见 INV-002 / INV-019）。**P0**
 
 ### R3 `req-import` 同版本重复导入会静默覆盖历史

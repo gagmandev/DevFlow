@@ -25,7 +25,7 @@ flowchart LR
 | 阶段 | 前置条件 | 允许命令 | 可改数据 | 必须留下的证据 | 失败恢复 |
 | --- | --- | --- | --- | --- | --- |
 | init | 目录可写 | `init` | 目录、`project.json` | `project.json` 本身 | 删 `.devflow` 重来；`--force` 幂等（但见 D-04） |
-| 需求导入 | `project.json` 存在 | `req-import` | `traceability*.json` | 版本化追踪表 | 重新导入（同版本会覆盖，见 R3） |
+| 需求导入 | **仅首次确认之前**、计划未激活 | `req-import` | `traceability*.json` | 版本化追踪表 | 首次可重导；确认后只能暂存（目标，见 08 D-02） |
 | 需求确认 | 追踪表 + 基准文档 | `req-confirm` | `project.json` | 基准 md + 追踪表 | 重新确认 |
 | 拆任务 | 需求已确认 | `plan-import`、`prompt-init`、`validate`、`graph` | `backlog-vN.json`、prompt、board、graph | 草稿计划 | 重新导入（`--force` 归档旧文件） |
 | 激活 | 草稿 + 校验 0 错误 + 需求文档存在 | `plan-activate` | 计划状态、`project.json` | `approved_by/at` | 无事务；中断可能"无 active 计划"（见 D-06） |
@@ -38,30 +38,45 @@ flowchart LR
 | 待验收 | 状态 `release_candidate` + 报告完整 + 快照一致 | `release-ready` | `project.json` | `release_ready_at` | 修复后重跑 |
 | 验收 | 状态 `release_ready` | `release-accept` | `project.json`（accepted） | `accepted_by/at` | 终态；继续开发走 CR |
 
-## 二、需求变更流程
+## 二、需求变更流程（目标：CR 暂存 + 原子提交）
 
 ```mermaid
 flowchart LR
   A[change-new<br/>CR draft] --> B[影响分析<br/>impacts / target_*]
-  B --> C[change-set<br/>confirmed]
-  C --> D[plan-import vNew<br/>based_on{CR, base}]
-  D --> E[prompt-init --plan N]
-  E --> F[change-apply<br/>事务提交]
-  F --> G[新计划 active<br/>project → in_progress/planned]
-  G --> H[执行受影响节点]
-  H --> I[regression-check → import]
-  I --> J[release → ready → accept]
+  B --> C[change-stage<br/>写 staging：新追踪表 + 新基准 + plan 草稿]
+  C --> D[用户确认<br/>change-set --status confirmed --by]
+  D --> E[change-apply<br/>唯一提交入口 + 事务]
+  E --> F[正式指针切换<br/>project/baseline/plan/CR 全量]
+  F --> G[受影响节点返工]
+  G --> H[regression-check → import]
+  H --> I[release → ready → accept]
 ```
 
-前置条件（`df.py:1623-1700`）：
-- CR `status=confirmed`、`target_plan_version` 存在；
-- `base_plan_version` / `base_requirement_version` 与当前一致（`base=0` 也参与比较）；
-- 目标计划 `status=draft`、`based_on.change_id == CR`、`based_on.plan_version == CR.base_plan_version`；
-- 目标计划的需求版本 = CR.target_requirement_version，且需求基准文件存在；
-- `migration_problems`（`dfcore.py:1705`）：旧节点不能消失、返工要写 `remark`、新计划不能凭空 completed；
-- `validate(activating=True)` 0 错误。
+**数据流（staging 不碰正式文件）**：
 
-失败恢复：事务 journal 在 `.devflow/.txn/<id>/`，`df.py recover --apply` 回滚（`df.py:2641`）。
+| 阶段 | 写入位置 | 正式数据是否变化 | 谁负责 |
+| --- | --- | --- | --- |
+| 提议 | `changes/CR-xxx/staging/**` + `manifest.json` | ❌ 不变 | 主控 |
+| 确认 | CR `requirement_change` + `staging_manifest_sha256` | ❌ 不变 | **用户**（`--by`） |
+| 提交 | 见 08 D-02 §5 的 9 个文件 | ✅ 事务内全量切换 | 主控执行 `change-apply` |
+
+**提交前置（必须全部满足）**：
+- CR `confirmed`；`base_plan_version` / `base_requirement_version` == 当前指针；
+- 目标计划 `draft`、`based_on` 指向本 CR、版本号 == `CR.target_plan_version`；
+- 需求变更时：staging 的 `requirement_version == current + 1`，双 digest 与 manifest 一致，
+  `plan.requirement_version == 新版本`，`plan.requirement_baseline_id == staging.baseline_id`；
+- `migration_problems` 为空、`validate(activating=True)` 0 错误。
+
+**失败恢复**：
+- 校验失败：不写任何文件，staging 保留，CR 仍 `confirmed`；
+- 写入中失败：`Transaction` 回滚全部 9 个文件（含指针与 project），CR 回 `confirmed`；
+- 进程崩溃：journal 停在 open，`recover --apply` 回滚；`doctor` 报告未完成事务。
+
+**正式指针切换点**：只在 `change-apply` 的第 7 步（`traceability.json`），且与 project/plan 更新在同一事务。
+切换成功后，旧回归与旧交付报告因 `baseline_id` 不匹配而失效。
+
+> 现状：没有 staging，`req-import` 直接覆盖正式表；`change-apply` 只切计划，不处理需求文件。
+> 因此本节的 staging 与 9 文件事务都是**待实现**。
 
 ## 三、七个状态模型（合法迁移 / 触发命令 / 前置条件 / 证据）
 
@@ -121,16 +136,18 @@ stateDiagram-v2
 
 ### 3.2 Project
 
+#### 实际行为（含缺陷，代码事实）
+
 ```mermaid
 stateDiagram-v2
-  [*] --> initialized: init
+  [*] --> initialized
   initialized --> requirements_confirmed: req-confirm
   requirements_confirmed --> planned: plan-activate
-  planned --> in_progress: start（首个节点开工）
-  in_progress --> regression: regression-check（无阻塞）
+  planned --> in_progress: start
+  in_progress --> regression: regression-check
   regression --> release_candidate: release
   release_candidate --> release_ready: release-ready
-  release_ready --> accepted: release-accept --by
+  release_ready --> accepted: release-accept
   accepted --> in_progress: change-apply
   planned --> requirements_confirmed: req-confirm（可执行，状态回退）
   regression --> planned: plan-activate（可执行，状态回退）
@@ -140,46 +157,111 @@ stateDiagram-v2
   analyzing --> clarifying: （声明，无命令写入）
 ```
 
-| 迁移 | 触发命令 | 前置条件（实际） | 证据 | 问题 |
-| --- | --- | --- | --- | --- |
-| initialized→requirements_confirmed | `req-confirm` | 基准文档存在 + 追踪表合格 | 追踪表、基准 md | — |
-| planned→requirements_confirmed | `req-confirm` | **不检查 planned** | 同上 | **状态回退 + 版本指针可改**（A7） |
-| requirements_confirmed→planned | `plan-activate` | 计划 draft + validate | `approved_by/at` | 无事务 |
-| planned/in_progress→planned | `plan-activate`（新版本） | 同上 | — | **可绕过 CR 换计划**（B2） |
-| in_progress→regression | `regression-check` | 无 open 节点、证据齐、需求覆盖 | `precheck.md`、`source-snapshot.json` | — |
-| regression→release_candidate | `release` | **只拒 accepted** | 报告 md + meta | blockers 非空也置位（D-06） |
-| release_candidate→release_ready | `release-ready` | 状态 + 全部门禁 + 报告完整 | `release_ready_at` | — |
-| release_ready→accepted | `release-accept --by` | 全部门禁重跑 | `accepted_by/at` | 不重校验需求基准（A6） |
-| accepted→in_progress | `change-apply` | CR 完整校验 | 新计划 + CR applied | 唯一合法出口 |
+**关键事实（不要按理想状态机理解）**：
 
-### 3.3 Requirement（**无迁移表，整表替换**）
+- `release` 的准入**只拒绝 `accepted`**（`df.py:2246`），不是"只允许从 `regression` 执行"；
+  从 `planned`/`in_progress` 直接执行 `release` 也会被接受，并把状态写成 `release_candidate`
+  （`df.py:2435`），即使 blockers 非空。
+- `plan-activate` 不检查项目状态（`df.py:587-640`），可从 `regression`/`release_candidate` 回到 `planned`。
+- `req-confirm` 只排除 4 个阶段（`df.py:434-437`），`planned` 下会回退到 `requirements_confirmed`（`df.py:466-467`）。
+- 项目状态共 **8 处**直接赋值：`df.py:468`（requirements_confirmed）、`628`（planned）、
+  `1080`/`1736`（in_progress）、`2006`（regression）、`2435`（release_candidate）、
+  `2594`（release_ready）、`2627`（accepted）。没有迁移表。
+
+#### 风险
+
+1. 状态可以跳过阶段（`release` 从任意状态）或回退（`plan-activate`/`req-confirm`），
+   而回退不会让已产出的回归/交付证据自动失效（靠版本号与 baseline 比对兜底，见 3.6）。
+2. `release_candidate` 同时表示"报告已生成"和"具备候选资格"，两类事实混在一个字段里。
+3. 没有任何守卫保证"进入 `release_ready` 前一定经过完整回归"——这一步由 `release-ready` 重跑门禁弥补，
+   但状态本身不能证明。
+
+#### 目标状态机（D-01 / D-06，待实现）
 
 ```mermaid
 stateDiagram-v2
-  state "active（在交付范围内）" as active
-  state "changed（被替代）" as changed
-  state "deferred（延期）" as deferred
-  state "out_of_scope（不在范围）" as oos
-  state "removed（删除）" as removed
-  [*] --> active: req-import（首次）
-  active --> changed: req-import（须 superseded_by → active）
-  active --> deferred: req-import（须 reason + confirmed_by）
-  active --> oos: req-import（须 reason + confirmed_by）
-  active --> removed: req-import（须 reason + confirmed_by）
-  changed --> active: req-import（仅要求 active 有验收标准）
-  deferred --> active: req-import（同上）
-  oos --> active: req-import（同上）
-  removed --> active: req-import（同上）
+  [*] --> initialized
+  initialized --> requirements_confirmed: req-confirm（仅首次、计划未激活）
+  requirements_confirmed --> planned: plan-activate（仅 v1）
+  planned --> in_progress: start
+  in_progress --> regression: regression-check（无阻塞）
+  regression --> release_candidate: release（全部门禁满足）
+  release_candidate --> release_ready: release-ready
+  release_ready --> accepted: release-accept --by
+  accepted --> in_progress: change-apply（唯一出口）
+```
+
+**目标禁止**：
+
+- `planned/regression/release_candidate → requirements_confirmed`（需求变更只能走 CR）；
+- `regression/release_candidate → planned`（计划变更只能走 `change-apply`）；
+- `release` 在门禁失败时改状态（D-06：保持原状态，报告记 `blockers`）。
+
+| 迁移 | 触发命令 | 前置条件（实际） | 证据 | 问题 |
+| --- | --- | --- | --- | --- |
+| initialized→requirements_confirmed | `req-confirm` | 基准文档存在 + 追踪表合格 | 追踪表、基准 md | — |
+| planned→requirements_confirmed | `req-confirm` | **不检查 planned**（目标禁止） | 同上 | 状态回退 + 版本指针可改（A7） |
+| requirements_confirmed→planned | `plan-activate` | 计划 draft + validate | `approved_by/at` | 无事务；仅 v1 合法 |
+| planned/in_progress→planned | `plan-activate`（新版本） | 同上 | — | **绕过 CR 换计划**（B2） |
+| in_progress→regression | `regression-check` | 无 open 节点、证据齐、需求覆盖 | `precheck.md`、快照 | — |
+| regression→release_candidate | `release` | **只拒 accepted** | 报告 md + meta | blockers 非空也置位（D-06） |
+| release_candidate→release_ready | `release-ready` | 状态 + 全部门禁 + 报告完整 | `release_ready_at` | — |
+| release_ready→accepted | `release-accept --by` | 全部门禁重跑 | `accepted_by/at` | 不校验需求基线（A6 / INV-029） |
+| accepted→in_progress | `change-apply` | CR 完整校验 | 新计划 + CR applied | 唯一合法出口 |
+
+### 3.3 Requirement（Schema / 当前 CLI / 目标 三层）
+
+**必须先分清三层，不能把目标要求当成现状。**
+
+| 层 | 允许什么 | 校验什么 | 代码 |
+| --- | --- | --- | --- |
+| Schema | `status ∈ {active, changed, removed, deferred, out_of_scope}`；`reason`/`confirmed_by`/`superseded_by` 都是**可选** | 类型/枚举 | `schemas/requirements.schema.json` |
+| **当前 CLI** | `req-import` **整表替换**，任意非 accepted 状态可执行；任意状态可改成任意状态 | 只查 active 的 `acceptance`（非空） | `df.py:399-427`、`dfcore.py:1898` |
+| 目标（D-01/D-02） | `active→retired` 必须带凭据 + 经已确认 CR；`retired→active` 同样要 CR；版本单调 +1 | 凭据、CR、baseline、版本 | 待实现 |
+
+> 因此：**下图中标注的 `reason` / `confirmed_by` / CR 都是"目标合法迁移"的条件，
+> 不是 `req-import` 当前的强制校验。** 当前 `req-import` 不会因为这些字段缺失而拒绝导入；
+> 只有 `validate` 与 `regression-check` 会在事后检查（且不在交付路径上）。
+
+**当前实际能力**（代码事实）：
+
+```mermaid
+stateDiagram-v2
+  state "active" as A
+  state "changed / deferred / out_of_scope / removed" as R
+  [*] --> A: req-import（首次）
+  A --> R: req-import（不校验凭据）
+  R --> A: req-import（只要求 active 有验收标准）
+  A --> A: req-import（可改验收标准/内容，版本不变）
+  R --> R: req-import（可改凭据，任意）
+```
+
+**目标合法迁移**（待实现）：
+
+```mermaid
+stateDiagram-v2
+  state "active" as A
+  state "changed" as C
+  state "deferred" as D
+  state "out_of_scope" as O
+  state "removed" as X
+  [*] --> A: 首次导入（计划未激活）
+  A --> C: CR + superseded_by 指向新 active 需求
+  A --> D: CR + reason + confirmed_by
+  A --> O: CR + reason + confirmed_by
+  A --> X: CR + reason + confirmed_by
+  C --> A: CR + 说明复活原因
+  D --> A: CR + 说明复活原因
+  O --> A: CR + 说明复活原因
+  X --> A: CR + 说明复活原因
 ```
 
 | 要点 | 事实 |
 | --- | --- |
-| 迁移入口 | 只有 `req-import` 整表替换（`df.py:399`）；没有逐条状态命令 |
-| 合法性检查点 | `validate`（`validate.py:297`）与 `regression-check`（`df.py:1931`）调用 `requirement_retirement_problems`；**`req-import` 不调用**、**交付门禁不调用** |
-| CR 关系 | 设计上需求变更必须走 CR；实现上 `req-import` 无状态门槛、无版本单调性检查、无 CR 绑定 |
-| 复活（非 active→active） | 唯一约束是"active 必须有非空 acceptance"（`dfcore.py:1898`）；**不要求**说明为什么复活、不要求 CR |
-| 证据 | `reason` / `confirmed_by`（退役）、`superseded_by`（changed）、`requirement_version` 递增、新 `confirmed-requirements-vN.md` |
-| 禁止（目标） | active→removed 等退役必须带凭据 + 经 CR；不允许无凭据退役后仍通过交付 |
+| 迁移入口 | 当前只有 `req-import` 整表替换；目标新增 `change-stage`（暂存）与 `change-apply`（正式切换） |
+| 合法性检查点 | 当前：`validate`（`validate.py:297`）、`regression-check`（`df.py:1931`）；**`req-import` 与交付门禁都不查** |
+| 凭据 | `reason` + `confirmed_by`（退役）、`superseded_by`（changed）、`requirement_version` 递增 |
+| 目标禁止 | 无凭据退役、跳版/回退、在计划激活后直接改正式表、复活不留原因 |
 
 **哪些需求变更必须经 CR + 用户确认**（目标，按 D-01/D-02）：
 
@@ -190,8 +272,6 @@ stateDiagram-v2
 | 新增需求 / 调整优先级 | 是（新版本） | 是 | ❌ 同上 |
 | 非 active → active（复活） | 是 | 是 | ❌ 只要求有验收标准 |
 | 只改描述性文字、不影响判定 | 否（但需审计） | 否 | ❌ 无审计 |
-
-> 当前 `req-import` 把以上所有情况都当作"整表替换"，既不要求 CR 也不要求用户确认。
 
 ### 3.4 CR
 
@@ -213,19 +293,37 @@ stateDiagram-v2
 
 ### 3.5 Plan
 
+**当前实际**（任意 draft 都能 `plan-activate`）：
+
 ```mermaid
 stateDiagram-v2
   [*] --> draft: plan-import
-  draft --> active: plan-activate
-  draft --> active: change-apply
+  draft --> active: plan-activate（任意版本）
+  draft --> active: change-apply（受 CR 约束）
   active --> superseded: 新版本激活
   superseded --> [*]
 ```
 
 | 迁移 | 触发 | 前置（实际） | 问题 |
 | --- | --- | --- | --- |
-| draft→active | `plan-activate` | 计划自身校验 + 需求基准存在 | **不要求 based_on / 不检查项目状态** |
+| draft→active | `plan-activate` | 计划自身校验 + 需求基准存在 | 不要求 `based_on`、不检查项目状态、不区分版本 |
 | draft→active | `change-apply` | CR 严格绑定 + 基准 + 迁移 + 事务 | 唯一受审计的通道 |
+
+**目标**（D-01，待实现）：
+
+```mermaid
+stateDiagram-v2
+  [*] --> draft: plan-import（v1 或变更用草稿）
+  draft --> active: plan-activate（仅 v1，且从未激活过计划）
+  draft --> active: change-apply（v2+ 唯一入口）
+  active --> superseded: change-apply 提交新版本
+  superseded --> [*]
+```
+
+- `plan-activate` 对 `plan_version > 1` **直接拒绝**，提示"请走 change-apply"；
+- `change-apply` 同时校验 CR/`based_on`/目标版本/基准/迁移，并在同一事务里写新计划、
+  supersede 旧计划、CR→applied、project 指针。
+- 目标：`plan.status=active` 只能由 `dfstate` 写。
 
 ### 3.6 Regression（报告级 + 项目级）
 

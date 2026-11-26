@@ -89,6 +89,10 @@
 - 能否绕过 CR？**能**（需求状态变更没有任何 CR 绑定）。
 - 现有 `requirement_retirement_problems` 只在两个"事后检查"入口调用，**不构成全流程强制**。
 
+**目标修法（D-02，待实现）**：`release_candidate` / `release_ready` 禁止 `req-import` 写正式；
+需求修改只能写 `changes/CR-xxx/staging/`，经用户确认后由 `change-apply` 在一个事务里切换正式指针与
+`baseline_id`；交付门禁重算 `baseline_id` 并校验退役凭据。
+
 **级别**：P0。对应不变量 INV-005 / INV-024 / INV-029。
 
 ### A7 `planned` 状态下 `req-confirm` 会回退状态并改版本指针（P0，本轮新增）
@@ -120,7 +124,10 @@
 - **证据**：`git status --porcelain -z`（`dfcore.py:961`）默认不列 ignored 文件；`git_changes_since` 没有 `--ignored`。
 - **影响**：改 `.env`、构建产物、被 `.gitignore` 的配置 → 既不在报告里，也不在 Git 变更里。若这类文件属于
   "运行必需配置"，交付证据会漏。
-- **级别**：P1（Git 语义限制，需要显式策略：禁止改、或要求声明 `ignored_allowlist`）
+- **级别**：P1。
+- **目标已定（D-04）**：production 默认 `git.ignored_policy = deny`，新增/变化的 ignored 文件即阻断；
+  例外走 allowlist（`path` + `purpose` + `approved_by`）；development 允许 `off` 但必须标
+  `non_production_verification`。**待实现**，当前代码仍完全不检测。
 
 ### B3 并行节点共享工作区，变更无法归属（P1）
 
@@ -189,7 +196,9 @@
 
 ### D2 `release` 在门禁失败时仍改状态（P1）
 
-- **证据**：`df.py:2435` 无条件 `status = release_candidate`，之后才 `if blockers: return 1`（`df.py:2447`）。
+- **证据**：`df.py:2435` 无条件 `status = release_candidate`，之后才 `if blockers: return 1`（`df.py:2447`）；
+  且 `release` 的准入**只拒绝 `accepted`**（`df.py:2246`），不是"只允许从 `regression` 执行"——
+  从 `planned`/`in_progress` 也能直接跑。
 - **影响**：项目看起来"已交付候选"，实际门禁未过；下游 `release-ready` 会拦住，但状态语义被污染。
 - **级别**：P1
 

@@ -23,7 +23,7 @@
 | 数据 | 主控 | 执行 Agent | CLI | 用户 | 强制手段 |
 | --- | --- | --- | --- | --- | --- |
 | `project.json` | ✓ 只能通过 `init/project-set/migrate/change-apply/release-*` | ✗ | ✓ 独占 | ✗（只读） | `PROJECT_PROTECTED_FIELDS`（`df.py:98`）+ 命令前置校验 |
-| `requirements/traceability*.json` | ✓ `req-import` | ✗ | ✓ | ✗ | Schema + `acceptance_spec_problems`（`dfcore.py:1898`） |
+| `requirements/traceability*.json` | ✓ `req-import`（**目标：仅首次确认前**；之后只能暂存） | ✗ | ✓ | ✗ | Schema + `acceptance_spec_problems`（`dfcore.py:1898`）；目标加状态门槛 |
 | `confirmed-requirements-vN.md` | △ 直接写文件 | ✗ | ✗（只读校验） | △ 口述 | **无强制**：`req-confirm` 只查存在/长度/关键词（`df.py:435-448`） |
 | `plans/backlog-vN.json` | ✗ 应只用 CLI | ✗ | ✓ 独占 | ✗ | 无文件级防篡改；依赖"只有 CLI 写"的约定 |
 | `plans/board-vN.md` / `dependency-graph-vN.md` | △ 可重渲染 | ✗ | ✓ 渲染 | ✗ | 派生文件；手改会被下次 `refresh` 覆盖 |
@@ -56,13 +56,13 @@
 | --- | --- | --- | --- |
 | 初始化 | `init` | 用户/主控 | 目录可写；已存在需 `--force` |
 | 档案 | `project-set` | 主控 | 字段白名单 + 档位受控（`df.py:330`） |
-| 需求 | `req-import` / `req-confirm` | 主控 | Schema + 验收标准 + 追踪表复查；accepted 拒绝 |
-| 计划 | `plan-import` / `plan-activate` | 主控 | 结构校验；**激活无 CR/状态前置（B2/B3）** |
+| 需求 | `req-import` / `req-confirm` | 主控 | 当前：Schema + 验收标准 + 追踪表复查；**目标：`req-import` 只在首次确认前写正式，之后只能写 CR staging**；`req-confirm` 目标仅限计划未激活 |
+| 计划 | `plan-import` / `plan-activate` | 主控 | `plan-import` 只产草稿；`plan-activate` 当前无 CR/状态前置（B2/B3），**目标仅允许 v1**，v2+ 只能 `change-apply` |
 | 提示词 | `prompt-init` | 主控 | 计划版本；`--force` 归档 |
 | 执行 | `start` | 主控（可代执行 Agent 触发） | 计划 active、依赖完成、提示词版本、上下文变更 |
 | 同步/验收 | `sync` / `accept` | 主控 | 证据 + 实时 Git + 范围（`df.py:1220`、`1341`） |
 | 异常 | `block` / `fail` / `retry` / `cancel` / `supersede` | 主控 | 状态机 + 尝试次数 |
-| 变更 | `change-new` / `change-set` / `change-apply` | 主控 | CR 状态 + 基准 + `based_on` + 迁移 + 事务 |
+| 变更 | `change-new` / `change-set` / `change-stage`（待实现）/ `change-apply` | 主控（`change-apply` 前需用户确认 CR） | CR 状态 + 基准 + `based_on` + 迁移 + 事务；**`change-apply` 是计划/需求正式切换的唯一入口** |
 | 回归 | `regression-check` / `regression-import` | 主控 | 无 open 节点 + 报告自洽 + 快照 |
 | 交付 | `release` / `release-ready` / `release-accept` | 主控 / 用户 | 门槛 + 报告完整 + 快照 + 状态 |
 | 维护 | `recover` / `migrate` / `doctor` / `validate` | 主控/用户 | 事务存在 / schema 版本 / 只读 |
@@ -130,13 +130,13 @@ change-new/change-set/plan-import/prompt-init/change-apply/recover`。其余写�
 | 直接改 `backlog-vN.json` 状态 | 禁止 | **无校验**（读时信任） | 无 | `.devflow` 被排除在 Git 变更外 | ❌ 拦不住 |
 | 直接改 `project.json` | 禁止 | 无校验 | 无 | 同上 | ❌ 拦不住 |
 | 改其他节点报告 | 禁止 | 只校验 `node_id` 字段与目录约定 | 无 | 同上 | ❌ 拦不住（可覆盖已完成节点的证据） |
-| 改 `confirmed-requirements-vN.md` | 禁止 | 只在 `req-confirm` 查长度/关键词 | 无 | 项目外 git 可看到，但流程不读 | ❌ 拦不住 |
+| 改 `confirmed-requirements-vN.md` | 禁止 | 只在 `req-confirm` 查长度/关键词 | 无 | **Git 本身能看到**（若 `.devflow` 已提交且未被 ignore）；**DevFlow 的 `git_changes_since` 显式过滤 `.devflow/`**（`dfcore.py:996-1000`），所以流程不消费 | ❌ 拦不住 |
 | 改 `traceability.json` 把需求标 retired | 禁止 | `req-import` 无状态门槛 | 无 | 同上 | ❌ 拦不住（且交付门禁跳过） |
 | 越界改业务代码 | 禁止 | `files_scope` + Git 实际变更 | 无 | **检测**而非阻止 | △ 事后可发现（有盲区） |
 | 伪造 `test-report.json` | 禁止 | 只校验自洽（统计/退出码/`attempt_id`） | 无 | 报告在 `.devflow` 内，不可见 | ❌ 无法证明 |
 | 改代码后重跑旧报告 | 禁止 | 源码快照比对 | 无 | ✅ `snapshot_id` | ✅ 能发现（除非同时改快照） |
 
-### 5.3 三层控制的真实边界
+### 5.3 四层控制的真实边界
 
 1. **Prompt 约束不是安全边界**：SKILL.md 里所有"不要手改 JSON"都只是对合作型 Agent 的提示。
 2. **CLI 命令权限防的是"误用"，不防"绕过"**：它能拒绝 `start`/`accept` 等命令，但阻止不了直接写文件。
@@ -153,7 +153,7 @@ change-new/change-set/plan-import/prompt-init/change-apply/recover`。其余写�
   - 报告由**CLI 代写**（Agent 把结果写到受限的 outbox，CLI 校验后搬入）；
   - 交付证据来自**外部 CI**（绑定 commit SHA + 需求 digest），而不是 Agent 的自述。
 
-## 五、权限边界层面的结论
+## 六、权限边界层面的结论
 
 1. **状态写权限收得比较紧**：project/plan 状态字段的写入都在 CLI 内，且 accepted 白名单默认拒绝。
 2. **证据、需求基准、以及 `.devflow` 内其他节点的报告，写权限基本没收**：靠"事后校验 + 人读"。

@@ -79,16 +79,17 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 
 ## 6. 哪些设计需要重新讨论？
 
-审查后已定 5 项（见 `08` 第一节），仍有 4 项待定：
+审查后已定 6 项（见 `08` 第一节），仍有 3 项待定：
 
 **已定**：
-1. **D-01**：影响交付基准的计划修改必须走已确认 CR，不设 `--replan` 旁路。
-2. **D-02**：CLI 生成双 digest + `baselines.json`；计划/CR/回归/交付绑同一 `baseline_id`。
+1. **D-01**：计划激活唯一入口——v1 用 `plan-activate`（仅当从未激活），v2+ 只能 `change-apply`。
+2. **D-02**：需求变更走 CR 暂存（staging）+ CLI 双 digest + `baselines.json` + `change-apply` 事务原子切换。
 3. **D-03 / D-09**：生产并行必须每节点独立 worktree；未实现前只允许串行。
-4. **D-05**：Agent 自报只是过程记录；生产回归以绑定 commit SHA + baseline 的 CI 结果为准。
-5. **D-06**：门禁失败不改状态；全部门禁通过才进 `release_candidate`。
+4. **D-04**：ignored 文件 production 默认 `deny`，例外需 allowlist（path/purpose/approved_by）。
+5. **D-05**：Agent 自报只是过程记录；生产回归以绑定 commit SHA + baseline 的 CI 结果为准。
+6. **D-06**：门禁失败不改状态；全部门禁通过才进 `release_candidate`。
 
-**待定**：D-04（ignored 文件策略）、D-07（legacy 退场）、D-08（示例项目）、D-10（是否拆分 `df.py`）。
+**待定**：D-07（legacy 退场）、D-08（示例项目）、D-10（是否拆分 `df.py`）。
 
 ## 7. 下一阶段应该先解决哪些问题？
 
@@ -116,7 +117,7 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 跑通引擎 223 条、示例 74 条、`validate`（只读）；整理 9 份设计文档 + 本总结。
 
 **没做**（遵守阶段限制）：没有改任何 `.py`/测试/配置/JSON；没有执行会改状态的 CLI（`init/start/sync/accept/release*` 等）；
-没有"顺手修"任何发现的问题；没有替产品做 D-01~D-10 的决定。
+没有"顺手修"任何发现的问题；没有替产品做 D-07 / D-08 / D-10 的决定（D-01~D-06、D-09 已在后续轮次定案）。
 
 **下一步**：等待独立审查。审查通过后再进入第二阶段（按第七节的 1→8 顺序实施），
 实施时每条改动都必须绑定对应 INV 编号与测试。
@@ -132,8 +133,28 @@ INV-024（交付门禁不重校验需求基线）、INV-025（`doctor` 写图无
 | 不变量重校 | INV-005（退役凭据）与 INV-024（交付门禁）由"已实现"下调为"部分"；新增 INV-029（交付重校验需求基线）；总数 28→29，已实现 14→12，部分 9→11，未实现 5→6 |
 | 事务描述修正 | 明确"唯一使用 `Transaction` 的是 `change-apply`"；`plan-activate`/`req-import`/`release`/`regression-import` 均无事务，且 `regression-import` 不改项目状态 |
 | 状态机补全 | 由 6 个补到 7 个（新增 Requirement / 展开 Regression、Release），标注触发命令、前置条件、证据与禁止迁移 |
-| 决策定案 | D-01 / D-02 / D-03+D-09 / D-05 / D-06 采纳；D-04 / D-07 / D-08 / D-10 仍待定 |
+| 决策定案（第三轮更新） | D-01 改为「计划激活唯一入口」；D-02 扩为「staging + 原子切换」；D-04 定为 production deny；D-03+09 / D-05 / D-06 维持；D-07 / D-08 / D-10 待定 |
 | 威胁模型 | 04 新增第五节：资产、威胁主体、攻击面 × 四层控制、指纹的边界 |
 | 一致性 | 00/01/02/03/04/05/06/07/08/09 交叉引用已对齐（风险号 A6/A7、B9/B10、INV-029） |
 
 > 本轮仍只改 Markdown；未运行任何会改变项目状态的命令。
+
+
+---
+
+## 附：第三轮审查修订记录
+
+| 修订项 | 变化 |
+| --- | --- |
+| D-01 收紧 | 由「计划变更走 CR（可 `--replan` 留痕）」改为「**计划激活唯一入口**：v1 才允许 `plan-activate`，v2+ 只能 `change-apply`」；`plan-import` 只产草稿 |
+| D-02 扩充 | 补全 CR 需求变更的完整设计：staging 目录结构、manifest、双 digest → `baseline_id`、确认人、9 文件事务提交顺序、回滚、证据失效时机（08 D-02 §1–§8） |
+| D-04 定案 | production 默认 `deny`；例外需 allowlist（`path`+`purpose`+`approved_by`）；development 允许 `off` 但必须标 `non_production_verification` |
+| 状态机澄清 | 03 的 Project / Requirement / Plan 全部拆成「实际行为 / 风险 / 目标」三段；明确 `release` 当前只拒 `accepted`、`req-import` 的 reason/confirmed_by 目前**不是**导入期校验 |
+| 数量修正 | INV-015 的项目状态直接赋值修正为 **8 处**（`df.py:468/628/1080/1736/2006/2435/2594/2627`） |
+| 结构修正 | 删除 07 中重复的「四、不变量 → 目标强制点」旧表；04 两个第五节重编号（威胁模型=五、结论=六）；「三层控制」改为「四层控制」 |
+| Git 可见性 | 04/02 明确：Git 本身能看到 `.devflow` 内改动（若已提交），但 DevFlow 的 `git_changes_since` 显式过滤 `.devflow/`，两者不同 |
+| 新增核对表 | 09 新增「决策的唯一实现入口」表：每条决策列出唯一写入口、当前竞争路径、关闭方式 |
+| 需求变更数据流 | 03 §二重写为「change-new → change-stage → 用户确认 → change-apply」，含 staging 数据流表、提交前置、失败恢复、指针切换点 |
+
+> 本轮仍只改 Markdown；未运行任何会改变项目状态的命令。所有目标功能（staging、baseline_id、
+> 9 文件事务、ignored deny、CI 证据绑定）均标注**待实现**。

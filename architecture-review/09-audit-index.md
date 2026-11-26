@@ -18,6 +18,8 @@
 | CR 基准过期拒绝 | `df.py:1640-1660` | `test_p1_workflow.py:856 ChangeBaseVersionTest` | 同上 |
 | 无 CR 换计划的缺口 | `df.py:522`、`validate.py:516-523`、`df.py:587` | **无**（本次新增结论） | 本文档 03 节 B2 |
 | ready 后改需求缩小交付范围 | `df.py:399`（无状态门槛）、`df.py:2231-2232`（跳过非 active）、`df.py:2565/2602`（交付不重校验） | **无** | 06 节 A6、05 节 INV-029 |
+| 计划激活无唯一入口（v2 可 plan-activate） | `df.py:587-640`（无版本限制）、`df.py:522`（based_on 可空） | **无** | 08 D-01、07 C1、03 §3.5 |
+| 需求变更无暂存目录 | 无 `changes/*/staging`；`df.py:423` 直写正式 | **无** | 08 D-02 §1-§5、03 §二 |
 | `planned` 下 req-confirm 回退状态 | `df.py:434-437`、`df.py:466-467` | **无** | 06 节 A7、03 节 B10 |
 | 退役凭据的实际调用点 | `validate.py:297`、`df.py:1931`（仅两处） | `RegressionCoverageTest` | 05 节 INV-005 |
 | 事务实际使用点 | 仅 `df.py:1706`（`change-apply`） | `TransactionTest`（只测事务对象） | 02 节 §四 |
@@ -97,6 +99,20 @@
 > 判定方法：**不只看函数是否存在**，还要看它被哪些入口调用。完整调用矩阵见
 > `05-system-invariants.md` 的 INV-005 / INV-017 / INV-024 / INV-029 行。
 
+## 五、决策的唯一实现入口（目标核对）
+
+| 决策 | 唯一实现入口（目标） | 当前竞争路径（必须关闭） | 关闭方式 |
+| --- | --- | --- | --- |
+| D-01 计划激活 | v1：`plan-activate`（仅当从未激活）；v2+：`change-apply` | `plan-activate` 可激活任意 draft（`df.py:587`）；`plan-import` 的 `based_on` 可空（`df.py:522`） | `plan-activate` 对 `version>1` 直接拒绝；`change-apply` 交叉校验 CR/版本/基准 |
+| D-02 需求切换 | `change-stage`（写 staging）+ `change-apply`（事务切换） | `req-import` 直写正式（`df.py:423`）、无状态门槛（`df.py:399`） | `req-import` 仅首次确认前可用；之后只写 staging |
+| D-03/09 并行隔离 | `plan-activate`/`change-apply` 校验 `isolation` 声明 | 共享工作区并行（无 worktree 声明也放行） | production 档位拒绝未声明隔离的并行组 |
+| D-04 ignored | `git_changes_since` + `release*` 门禁 | 现状完全不检测（`df.py` 无 `--ignored`） | production 默认 `deny` + allowlist（`path/purpose/approved_by`） |
+| D-05 证据 | `regression-import`（CI 结果）+ `release*` 校验 | Agent 自写 `test-report.json` 直接作为证据 | 生产要求 CI 绑定 `commit_sha` + `baseline_id` |
+| D-06 发布失败 | `release` 状态写入点 | blockers 非空仍置 `release_candidate`（`df.py:2435`） | 仅全部门禁满足才写状态 |
+
+> 判定标准：每条决策都必须只有一个"写正式数据"的入口；其他路径要么只写草稿，要么直接拒绝。
+> 只要存在第二个能写正式的入口，就视为未实现。
+
 ## 五、文档间引用关系
 
 ```
@@ -106,7 +122,7 @@ architecture-review/
   02-data-model.md             ← 由 01 的"数据写入点"展开
   03-lifecycle-and-state-machines.md ← 由 02 的"版本关系"展开
   04-permission-boundaries.md  ← 由 01 的"谁写什么"展开
-  05-system-invariants.md      ← 汇总 02/03/04 的约束，编号 INV-001..028
+  05-system-invariants.md      ← 汇总 02/03/04 的约束，编号 INV-001..029
   06-cross-module-risks.md     ← 每条风险回指 INV 编号
   07-target-architecture.md    ← 每条建议回指 INV 编号
   08-decisions-required.md     ← 已定决策（D-01/02/03/05/06）+ 待定项 + 实施顺序

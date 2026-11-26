@@ -18,7 +18,7 @@
 | ID | 规则 | 适用范围 | 强制执行位置 | 验证方法 | 当前实现 | 现存风险 | 级别 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | INV-001 | 项目/计划/节点状态只有一个事实来源：`backlog-vN.json` 与 `project.json`；看板与依赖图是派生文件，不得作为判断依据 | 计划、状态、看板 | `render_board` + `refresh()`（`df.py:152`）；`validate` 只读 JSON | `test_devflow.BoardTest`、`test_docs_consistency` | 部分 | 派生文件手改不会被发现；没有内容哈希 | P1 |
-| INV-002 | 正式需求基准（`confirmed-requirements-vN.md`）只能通过变更流程修改；内容变更必须产生新版本 | 需求、CR、交付 | 无（`req-confirm` 只查存在/长度/关键词，`df.py:435-448`；`req-import` 无状态门槛，`df.py:399`） | **缺失**：应加 CLI 生成的 SHA-256 + 变更前后比对 | 未实现 | 直接改文件内容不改版本，回归/交付全部照样通过 | **P0** |
+| INV-002 | 正式需求基准（`confirmed-requirements-vN.md`）只能通过变更流程修改；内容变更必须产生新版本 | 需求、CR、交付 | 无（`req-confirm` 只查存在/长度/关键词，`df.py:435-448`；`req-import` 无状态门槛，`df.py:399`）；目标：`change-stage` + `change-apply` 唯一提交 | **缺失**：目标用 staging + 双 digest + baseline 比对 | 未实现 | 直接改文件内容不改版本，回归/交付全部照样通过 | **P0** |
 | INV-003 | 需求版本指针（`project.current_requirement_version`）必须与 `traceability.json.requirement_version` 及 `traceability-vN.json` 内容一致；版本只能单调前进 | 需求、回归、交付 | 无（`validate` 只查文件存在，`validate.py:299-304`；`req-confirm` 在 `planned` 下可直接改指针，`df.py:434-469`） | **缺失** | 未实现 | 指针漂移、版本回退、同版本覆盖后无人发现（B10） | **P0** |
 
 ## B. 需求完整性
@@ -42,7 +42,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | INV-009 | 计划图必须无环、依赖节点存在、不依赖 superseded/cancelled、不自依赖、依赖不重复 | 计划 | `find_cycles`（`dfcore.py:1390`）+ `validate.py:437-460` | `test_devflow.GraphTest`、`test_p1_workflow.DependencyCheckParallelTest` | 已实现 | — | P0 |
 | INV-010 | 同一并行组内不得有直接/间接依赖，且 `files_scope`/`db_objects`/`api_contracts`/`shared_config` 不得冲突（含通配符交集） | 并行 | `parallel_issues`（`dfcore.py:1629`）；`scope_overlap` 支持通配符（`dfcore.py:1575`）；例外必须点名 `nodes` | `test_p1_workflow.ParallelSafetyTest`、`test_v14_gates.WildcardScopeTest` | 部分 | 资源按字符串相等比较，不识别"同一张表的别名"；保守判冲突可能误报 | P1 |
-| INV-011 | 执行 Agent 只能修改 `files_scope` 内文件（含新增/删除/重命名） | 执行、验收 | `scope_violations`（`dfcore.py:710`）+ `evaluate_node_changes`（`df.py:1148`） | `test_p1_workflow.GitScopeTest`、`test_v14_gates.AcceptLiveGitTest` | 部分 | 检测而非阻止；ignored 文件与 baseline dirty 文件存在盲区（见 INV-012） | P0 |
+| INV-011 | 执行 Agent 只能修改 `files_scope` 内文件（含新增/删除/重命名） | 执行、验收 | `scope_violations`（`dfcore.py:710`）+ `evaluate_node_changes`（`df.py:1148`） | `test_p1_workflow.GitScopeTest`、`test_v14_gates.AcceptLiveGitTest` | 部分 | 检测而非阻止；ignored 文件与 baseline dirty 文件存在盲区（见 INV-012）；**目标已定（D-04）**：production 默认 `deny` + allowlist（`path/purpose/approved_by`），development 允许 `off` 但须标非生产级 —— 待实现 | P0 |
 
 ## E. 真实变更识别
 
@@ -56,14 +56,14 @@
 | ID | 规则 | 适用范围 | 强制执行位置 | 验证方法 | 当前实现 | 现存风险 | 级别 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | INV-014 | 节点状态只能沿 `TRANSITIONS` 迁移，表外迁移必须拒绝 | 节点 | `TRANSITIONS`（`dfcore.py:61`）+ `transition()`（`df.py:159`） | `test_devflow.StateMachineTest` | 已实现 | 手改 JSON 可绕过（INV-001） | P0 |
-| INV-015 | 项目状态只能沿合法生命周期推进，不得跳阶或回退（唯一回退入口是 `change-apply`） | 项目 | **无迁移表**；7 处直接赋值（`df.py:468/628/1080/1736/2006/2435/2594/2627`） | **缺失**：应枚举所有命令 × 状态 | 未实现 | `plan-activate` 可从 regression/release_candidate 回 planned；`release` 可从任意状态跳 candidate | **P0** |
+| INV-015 | 项目状态只能沿合法生命周期推进，不得跳阶或回退（唯一回退入口是 `change-apply`） | 项目 | **无迁移表**；**8 处**直接赋值：`df.py:468`(requirements_confirmed) / `628`(planned) / `1080`、`1736`(in_progress) / `2006`(regression) / `2435`(release_candidate) / `2594`(release_ready) / `2627`(accepted) | **缺失**：应枚举所有命令 × 状态 | 未实现 | `plan-activate` 可从 regression/release_candidate 回 planned；`release` 可从任意状态跳 candidate（只拒 accepted，`df.py:2246`）；`req-confirm` 可从 planned 回退 | **P0** |
 | INV-016 | `accepted` 是终态：白名单外的写命令必须拒绝；只有 `change-apply` 能退出 | 全部命令 | `ACCEPTED_ALLOWED`（`df.py:78`）+ `accepted_denial`（`df.py:212`）+ `main()` 守卫 | `test_v14_gates.AcceptedGuardTest`（枚举全部命令） | 已实现 | `init --force` 不在白名单体系内（但不写 `project.json`，见 D-04） | P0 |
 
 ## G. 原子性与历史
 
 | ID | 规则 | 适用范围 | 强制执行位置 | 验证方法 | 当前实现 | 现存风险 | 级别 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| INV-017 | 多文件状态变更必须原子（全成或可回滚） | 计划生效、需求导入、回归导入、交付报告 | **只有** `cmd_change_apply` 使用 `Transaction`（`dfcore.py:781`、`df.py:1706-1714`） | `test_p0_hardening.TransactionTest`（只测事务对象） | 部分 | 逐组核对：`plan-activate`（3 写）/`req-import`（2 写）/`release`（4 写）/`regression-import`（2 写 + 归档）/`accept`·`sync`·`start`（计划 + 看板）都**没有**事务，中断留不一致（详见 02 §四） | P1 |
+| INV-017 | 多文件状态变更必须原子（全成或可回滚） | 计划激活、需求切换、回归导入、交付报告 | **当前只有** `cmd_change_apply` 使用 `Transaction`（`dfcore.py:781`、`df.py:1706-1714`），且只覆盖 5 个文件；目标扩展为 9 个（含需求指针与 baseline，见 08 D-02 §5） | `test_p0_hardening.TransactionTest`（只测事务对象，未覆盖各命令） | 部分 | `plan-activate`（3 写）/`req-import`（2 写）/`release`（4 写）/`regression-import`（2 写 + 归档）/`accept`·`sync`·`start`（计划 + 看板）都**没有**事务（详见 02 §四） | P1 |
 | INV-018 | 历史版本不得被静默覆盖（计划、提示词、节点报告、回归报告、交付报告） | 全部历史 | `plan-import --force` 归档（`df.py:501`）、prompt 归档（`df.py:948`）、报告归档（`df.py:996`/`1819`）、release md 归档（`df.py:2409`） | `test_p1_workflow.PromptBindingTest`、`RegressionJsonTest` | 部分 | `req-import` 同版本覆盖无守卫（`df.py:423`）；`release-report.json` 无归档 | P1 |
 
 ## H. 回归与交付
