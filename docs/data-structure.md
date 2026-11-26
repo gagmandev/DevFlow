@@ -105,6 +105,7 @@
 | `git_discrepancies` | | 实际变更与 `modified_files` 的差异 |
 | `git_waivers` | | 确认 Git 差异的记录 |
 | `db_objects` / `api_contracts` / `shared_config` | | 并行冲突检测用；同组不允许交集 |
+| `scope_waivers` / `git_waivers` | | 越界与差异豁免；含实际文件清单、原因、时间、操作者（只追加） |
 | `deliverables` | | `accept` 时记录的交付物指纹（sha256 或 size+mtime）、契约文件指纹与当时的 git HEAD |
 | `contract_bindings` | | `api_contracts` / `db_objects` 对应的可核查文件（`{kind, id, files}`） |
 | `scope_baseline` | | `start` 时已存在的交付物；空 `files_scope` 时判断哪些是本轮新增文件 |
@@ -205,7 +206,7 @@ Markdown 由 `regression-import` 从 JSON 渲染，不手工维护。
 4. `ready` / `in_progress` / `needs_review` 的节点，依赖全部 completed
 5. `completed` 节点有执行报告 + 测试证据（或 `no_test` + 理由）
 6. `parallel_group` 内成员之间没有依赖
-7. 节点引用的 `REQ-xxx` 在追踪表里存在
+7. 节点引用的 `REQ-xxx` 在追踪表里存在；active 需求必须有非空 `acceptance`
 8. `plan_version` 与文件名一致，`project_id` 与项目档案一致
 9. `needs_review` / `completed` 的节点，`scope_violations` 必须为空
 10. 节点有 `current_attempt_id` 时，两份报告的 `attempt_id` 必须与之一致
@@ -214,7 +215,8 @@ Markdown 由 `regression-import` 从 JSON 渲染，不手工维护。
 13. 未完成节点的提示词元数据必须与 `project_id` / `plan_version` / `requirement_version` 一致
 14. 同一 `parallel_group` 内不存在依赖、文件重叠或 `db_objects`/`api_contracts`/`shared_config` 交集（除非有 `parallel_exceptions`）
 15. `release_ready` 之前 `regression/final-report.json` 必须存在且推导为 `passed`
-16. `accepted` 之后节点类与交付类命令全部拒绝执行；状态只能由变更流程（`change-apply`）回到 `in_progress`
+16. `accepted` 是白名单终态：只读、变更准备、`change-apply`、`recover` 之外一律拒绝；
+    `change-apply` 是唯一把状态带回 `in_progress` 的入口
 17. 非 `active` 需求必须留凭据：`deferred`/`out_of_scope`/`removed` 要有 `reason` + `confirmed_by`，`changed` 要有指向 active 需求的 `superseded_by`
 18. `change-apply` 前 `base_plan_version` / `base_requirement_version` 必须等于当前版本（`0` 也算有效基准）
 19. 节点的 `inputs` 若被某个直接依赖记录为交付物，`start` 前指纹必须未变（否则需 `context_acks` 留档）

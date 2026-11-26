@@ -129,9 +129,12 @@ JSON 是事实来源，整体状态必须与检查项推导结果一致；缺必
 | `release-accept` | `release_ready → accepted`（用户确认） |
 | `recover` | 回滚未完成事务，恢复文件到事务前 |
 
-`accepted` 是终态：之后 `start` / `sync` / `accept` / `retry` / `regression-check` / `release` /
-`release-ready` 都会被拒绝（退出码 2）。要继续开发走 `change-new` → `change-apply`，
-新计划激活时状态回到 `in_progress`。
+`accepted` 是白名单终态：只读命令、`change-new` / `change-set`、`plan-import` / `prompt-init`、
+`change-apply`、`recover` 之外全部拒绝（退出码 2）。`change-apply` 是唯一出口，新计划激活时
+状态回到 `in_progress`。
+
+`sync` 只判定一次不够：`accept` 会重新检测 Git 工作区，sync 之后新增/删除/改名的文件
+会重新过 `files_scope`。
 
 ## 四、示例项目走了一遍
 

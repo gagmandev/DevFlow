@@ -83,6 +83,29 @@ class WorkflowDocTest(unittest.TestCase):
     def test_external_import_documented(self):
         self.assertIn("--external", read("SKILL.md"))
 
+    def test_accepted_allowlist_documented(self):
+        text = read("SKILL.md")
+        self.assertIn("白名单", text)
+        for cmd in ("change-new", "change-set", "change-apply"):
+            self.assertIn(cmd, text)
+        self.assertIn("唯一出口", text)
+
+    def test_accept_live_git_documented(self):
+        text = read("SKILL.md") + read("references/release-rules.md")
+        self.assertIn("实时 Git", text)
+
+    def test_active_requirement_acceptance_documented(self):
+        text = read("SKILL.md") + read("references/testing-rules.md")
+        self.assertIn("active", text)
+        self.assertIn("验收标准", text)
+
+    def test_ci_pins_python38_runner(self):
+        text = read(".github/workflows/ci.yml")
+        self.assertIn("ubuntu-22.04", text, "Python 3.8 必须固定到 ubuntu-22.04")
+        self.assertIn('python: "3.8"', text)
+        self.assertIn('python: "3.12"', text)
+        self.assertNotIn("continue-on-error", text)
+
 
 if __name__ == "__main__":
     unittest.main()

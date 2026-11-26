@@ -109,9 +109,21 @@ in_progress ──(全部节点完成)──> regression
 回归结论从 `final-report.json` 读取（旧项目可加 `--legacy-regression` 读 Markdown 的
 `结论：passed` 行）。没有结论行、写成 `failed`，或者必需检查项没跑，都进不了 `release_ready`。
 
-**`accepted` 是终态。** 到达之后 `start` / `sync` / `accept` / `retry` / `regression-check` /
-`release` / `release-ready` 全部拒绝执行（退出码 2），`regression-check` 也不能把状态改回
-`regression`。要继续开发只能走变更：`change-new` → `change-apply`（新计划 + 状态回 `in_progress`）。
+**`accepted` 是终态，且是白名单制。** 只有这些写命令还能用：
+
+| 允许 | 作用 |
+| --- | --- |
+| `change-new` / `change-set` | 编辑变更申请，不改变状态 |
+| `plan-import` / `prompt-init` | 准备变更计划与提示词 |
+| `change-apply` | 唯一出口，状态回 `in_progress` |
+| `recover` | 回滚中断的事务 |
+| `board` / `graph` | 重渲染派生文件 |
+
+其余写命令（`req-import` / `req-confirm` / `project-set` / `start` / `sync` / `accept` /
+`retry` / `regression-check` / `regression-import` / `release` / `release-ready` /
+`release-accept`）一律退出码 2。新增命令默认也被拒——不用维护黑名单。
+
+`accepted` 之后每次 `accept` 都会被拒，因此不会出现"验收后重新验收改证据"的情况。
 
 ## 三·五、交付报告必须真的写完
 

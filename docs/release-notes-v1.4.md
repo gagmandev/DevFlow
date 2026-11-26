@@ -87,7 +87,7 @@ python df.py migrate --legacy-release   # 唯一受控的兼容路径，会写�
 
 | 层 | 命令 | 结果 |
 | --- | --- | --- |
-| 引擎 | `python -m unittest discover -s tests -v` | **195 条全部通过** |
+| 引擎 | `python -m unittest discover -s tests -v` | **223 条全部通过** |
 | 示例项目 | `cd examples/sample-project && python -m unittest discover -s tests` | 74 条通过 |
 | 端到端 | `python scripts/df.py self-test` | 60 步 → accepted（含并行与外部报告） |
 | 示例体检 | `python ../../scripts/df.py doctor` | 通过（提示补 `quality_profile`） |
@@ -113,3 +113,46 @@ python df.py migrate --legacy-release   # 唯一受控的兼容路径，会写�
 - 本地三层测试（引擎 / 示例 / 端到端）全部通过。
 - CI 配置已就绪，但**尚未在 GitHub 上真实运行**，因此本次不宣称"Linux/Windows CI 全绿"。
 - 结论：**本地生产质量验收通过；CI 验收待首次 workflow 运行后确认。**
+
+
+---
+
+# v1.4.1 补丁说明
+
+基线 `a70334c` 复审后修复 5 个门禁缺口 + 2 个连带缺陷。不改变架构，只收紧判定。
+
+## 修了什么
+
+| 编号 | 问题 | 现在 |
+| --- | --- | --- |
+| V141-01 | `accept` 只看 sync 时的结论 | `accept` 在锁内重新计算 Git 变更，合并报告声明后重跑范围校验；实时结果先落盘 |
+| V141-02 | accepted 用黑名单保护 | 改为白名单：只读 + 变更准备 + `change-apply` + `recover`；新增命令默认被拒 |
+| V141-03 | `project-set` 可改任意字段、可静默降档 | 字段白名单；档位切换需 `--reason --by`，降级需 `--confirm-downgrade`，写 `profile_changes` |
+| V141-04 | active 需求可无验收标准 | `req-import` 直接拒绝、`validate` 报 error、`regression-check` 再拦；`req-confirm` 复查追踪表 |
+| V141-05 | 线程锁 release 饥饿 | 每路径 `RLock` + 独立 OS 锁，等待不占管理锁 |
+| V141-06 | 新建 CR 的 `impacts` 与 schema 冲突 | draft 允许空，`change-apply` 强制非空 |
+| V141-07 | `project.json` 缺生命周期字段 | 补齐 `accepted_at` / `accepted_by` / `release_ready_at` / `release_candidate_at` 等 |
+
+## accepted 下还能做什么
+
+| 允许 | 说明 |
+| --- | --- |
+| `status` / `next` / `task` / `validate` / `doctor` / `self-test` | 只读 |
+| `board` / `graph` | 重渲染派生文件 |
+| `change-new` / `change-set` | 编辑 CR，状态不变 |
+| `plan-import` / `prompt-init` | 准备变更计划与提示词 |
+| `change-apply` | 唯一出口，状态回 `in_progress` |
+| `recover` | 回滚中断事务 |
+
+## 验收方式
+
+```bash
+python -m unittest discover -s tests      # 引擎
+cd examples/sample-project && python -m unittest discover -s tests
+python ../../scripts/df.py doctor
+python scripts/df.py self-test            # 端到端 + 并行 + external
+```
+
+CI 矩阵调整：Python 3.8 固定在 `ubuntu-22.04`（`ubuntu-latest` 无 3.8 构建），
+3.12 用 `ubuntu-latest`，Windows 两个版本都跑；Ubuntu+3.12 额外跑完整 `self-test` 并上传报告。
+**CI 结果以 GitHub Actions 实际运行为准**——本地无法替代。

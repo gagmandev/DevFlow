@@ -132,6 +132,17 @@ $DF migrate      # 升级旧版 project.json（released → accepted）
 事务日志在 `.devflow/.txn/<id>/`，快照也在里面。回滚是确定安全的：
 只有全部写完才会标记 `committed`。
 
+## 七·五、改项目档案（受限）
+
+```bash
+$DF project-set --patch notes.json      # 只能改资料性字段
+$DF project-set --profile production --reason "准备上线" --by "张三"
+```
+
+`status` / `current_plan_version` / `current_requirement_version` / `accepted_*` 这类字段
+不接受 patch，只能由对应流程写。档位切换必须给 `--reason` + `--by`，降级还要
+`--confirm-downgrade`，记录进 `profile_changes`。
+
 ## 七·六、质量档位
 
 ```bash
@@ -166,6 +177,10 @@ $DF self-test --json --out self-test.json
 **Q：`accept` 说证据不全？**
 看它列的具体项：缺执行报告、缺 test-report.json、status 不是 passed、某条命令退出码非 0、
 统计对不上、验收标准没逐条对应、`attempt_id` 不一致。让执行 Agent 补齐后重新 `sync`。
+
+**Q：`accept` 突然说"越界"，但 sync 时是好的？**
+`accept` 会重新检测 Git 工作区。sync 之后新增/删除/改名的文件都会重新过 `files_scope`。
+撤回改动、或走变更扩范围、或 `accept --allow-scope --reason` 留档（会记录实际文件清单）。
 
 **Q：`start` 说"依赖产物被修改过"？**
 `accept` 时节点会记交付物指纹。上游节点完成后，如果你又改了它产出的文件（而本节点

@@ -78,6 +78,24 @@ $DF status        # 不在 DevFlow 项目内会明确报错
 **机器能查的规则不要靠读文档记**：状态迁移、证据校验、范围比较、并行冲突、版本绑定、
 交付报告完整性、源码快照，全部由 `df.py` / `validate.py` 强制执行。文档写错了以代码为准，并且要修文档。
 
+### 项目档案只能改"资料性字段"
+
+`project-set --patch` 只允许改：`project_name` / `project_type` / `tech_stack` / `commands` /
+`constraints` / `conventions` / `analysis` / `notes`。
+
+`status` / `current_plan_version` / `current_requirement_version` / `accepted_*` / `schema_version`
+等由状态机维护的字段一律拒绝——状态只能由对应流程改。
+
+质量档位也不是随便切的：
+
+```bash
+$DF project-set --profile production --reason "准备上线" --by "张三"
+$DF project-set --profile development --reason "回到试验期" --by "张三" --confirm-downgrade
+```
+
+每次切换都会写进 `project.json` 的 `profile_changes`；`production → development` 还要显式
+`--confirm-downgrade`。
+
 ### 质量档位
 
 `project.json` 的 `quality_profile` 决定门槛松紧：
@@ -133,8 +151,12 @@ $DF project-set --patch patch.json
 $DF req-import --file traceability.json --version 1
 ```
 
-每条需求必须有 `acceptance`（至少一条可判断真假的验收标准）。没有验收标准的需求，
-后面既没法拆任务也没法验收。
+每条 **active** 需求必须有 `acceptance`：至少一条、不能是空字符串/纯空格，对象格式的
+`criterion` 不能为空。**`req-import` 会直接拒绝**不符合的追踪表，`validate` 也会报 error，
+`regression-check` 还会再拦一次——三道闸，不要指望"先导进去后面补"。
+
+非 active（`deferred` / `out_of_scope` / `removed` / `changed`）不要求验收标准，
+但要有 `reason` + `confirmed_by`，`changed` 还要 `superseded_by`。
 
 ## 5. clarify · 澄清
 
@@ -364,7 +386,15 @@ $DF sync DF-003 --external --from /path/to/reports
 - `verify_changes: warn`（默认）→ 提示，验收前人工看
 - `verify_changes: error` → 阻止验收，确认后用 `accept --ack-changes --reason "..."` 留档
 
-项目不是 git 仓库、或项目目录不是仓库根时自动降级，不阻断流程。
+**`accept` 会重新算一遍，不信任 sync 的旧结论**：sync 之后新增、删除、改名的文件
+都会按实时 Git 工作区重新过 `files_scope`。三条纪律：
+
+- `--ack-changes` 只确认"差异可以接受"，**不能**代替 `--allow-scope` 放行越界文件
+- `--allow-scope --reason` 才豁免范围，且会记录本次实际越界文件清单、原因、时间、操作者
+- 项目不是 git 仓库 / 不是仓库根时：`development` 只提示；`production`（`git.required: true`）
+  直接拒绝验收，`--ack-changes` 也救不了
+
+历史 waiver 只追加不覆盖，重新验收不会丢之前记录。
 
 ## 11. 失败与阻塞
 
@@ -457,7 +487,7 @@ $DF self-test --json --out /tmp/self-test.json   # 机器可读结果
 
 它在临时目录从 `init` 一路走到 `release-accept`，再跑两条支线：
 
-- **主链路**：需求 → 计划 → 执行 → 验收 → 变更 → 回归 → 交付（约 28 步）
+- **主链路**：需求 → 计划 → 执行 → 验收（含实时 Git 核对）→ 变更 → 回归 → 交付（约 28 步）
 - **并行**：两个无依赖节点同组，两个进程同时 `start`，验证不丢状态、attempt 独立
 - **外部报告**：`sync --external` 正常导入，以及 attempt 错误、缺测试报告、缺证据块、越界、测试失败五类拒绝
 
@@ -559,9 +589,21 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 
 必须带 `--by`，必须处于 `release_ready`。置 `accepted` 并记录验收人和时间。
 
-**`accepted` 是终态**：`start` / `sync` / `accept` / `retry` / `regression-check` / `release`
-等命令会被直接拒绝（退出码 2），`regression-check` 也不会再把状态改回 `regression`。
-需要继续开发必须走变更流程：`change-new` → `change-apply`（生成新计划，状态回 `in_progress`）。
+**`accepted` 是终态，而且用的是白名单**——不在名单里的写命令一律拒绝（退出码 2），
+不靠"记得把新命令加进黑名单"。
+
+| accepted 下允许 | 说明 |
+| --- | --- |
+| `status` / `next` / `task` / `validate` / `doctor` / `self-test` | 只读 |
+| `board` / `graph` | 只重渲染派生文件 |
+| `change-new` / `change-set` | 编辑变更申请，**不改变** accepted 状态 |
+| `plan-import` / `prompt-init` | 准备变更用的草稿计划与提示词 |
+| `change-apply` | **唯一出口**：新计划生效，状态回 `in_progress` |
+| `recover` | 只回滚中断的事务 |
+
+`req-import` / `req-confirm` / `project-set` / `start` / `sync` / `accept` / `retry` /
+`regression-check` / `regression-import` / `release` / `release-ready` / `release-accept`
+在 accepted 下一律被拒。需求基准要改只能走 CR。
 
 回归结论从 `final-report.json` 读取（旧项目可用 `--legacy-regression` 读 Markdown 的
 `结论：passed` 行）。没写结论、写成 `failed`、或者节点没完成，都进不了 `release_ready`。
@@ -586,6 +628,8 @@ $DF release-accept --by "张三"   # 3) 用户验收 → accepted
 16. 不把必需检查项标成 optional，不给必需项编造 ID——必需集合只认质量配置。
 17. 回归之后改了代码，就不要拿旧报告交付；重新跑回归再导入。
 18. 交付报告是给人验收的，不写占位内容；不适用要写清原因。
+19. `accepted` 之后不再写状态：只读 + 变更准备 + `change-apply`，其余一律拒绝。
+20. `project-set` 不碰状态机字段；切档位必须留原因和操作者。
 
 ## 16. 文件索引
 

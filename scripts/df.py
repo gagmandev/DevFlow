@@ -73,22 +73,42 @@ MUTATING_COMMANDS = {
     "migrate",
 }
 
-# accepted 是终态：没走变更流程就不能再改节点或重跑交付。
-# 想继续开发只有一条路：change-new → change-apply（新计划 + 状态回 in_progress）。
-FROZEN_ON_ACCEPTED = {
-    "start",
-    "sync",
-    "accept",
-    "block",
-    "fail",
-    "retry",
-    "cancel",
-    "supersede",
-    "plan-activate",
-    "regression-check",
-    "regression-import",
-    "release",
-    "release-ready",
+# accepted 是终态：白名单之外的写命令一律拒绝。
+# 只有 change-* 是出口：change-apply 会生成新计划并把状态带回 in_progress。
+ACCEPTED_ALLOWED = {
+    # 只读
+    "status", "next", "task", "validate", "doctor", "self-test",
+    # 派生文件（看板/依赖图），不改状态
+    "board", "graph",
+    # 变更准备：导入草稿计划、生成提示词，都不改变生命周期
+    "plan-import", "prompt-init",
+    # 变更流程：可以创建/编辑 CR；只有 change-apply 能退出 accepted
+    "change-new", "change-set", "change-apply",
+    # 崩溃恢复：只回滚事务，不改变生命周期
+    "recover",
+}
+
+#: project-set 允许通过 patch 修改的字段（其余由状态机/流程维护）
+PROJECT_SET_FIELDS = {
+    "project_name", "project_type", "tech_stack", "commands",
+    "constraints", "conventions", "analysis", "notes",
+}
+
+#: 任何命令都不允许直接改的字段（只能由专用流程写）
+PROJECT_PROTECTED_FIELDS = {
+    "schema_version",
+    "status",
+    "current_plan_version",
+    "current_requirement_version",
+    "created_at",
+    "updated_at",
+    "accepted_at",
+    "accepted_by",
+    "release_ready_at",
+    "release_candidate_at",
+    "legacy_regression_accepted",
+    "legacy_release_shortcut",
+    "quality_profile",   # 只能通过 --profile 受控变更
 }
 
 NODE_DEFAULTS = {
@@ -134,6 +154,20 @@ def ctx(args) -> tuple[Path, core.Paths, core.Project]:
     if not (root / core.DF_DIRNAME / "project.json").exists():
         root = core.find_root(root)
     return root, core.Paths(root), core.Project(root)
+
+
+def accepted_denial(cmd: str) -> str | None:
+    """accepted 终态的默认拒绝策略：白名单之外一律拒绝。
+
+    返回 None 表示放行；返回字符串是拒绝理由。
+    """
+    if cmd in ACCEPTED_ALLOWED:
+        return None
+    return (
+        f"项目已验收（accepted），不能再执行 {cmd}。\n"
+        "accepted 是终态：只有 change-new / change-set 能编辑变更申请，"
+        "change-apply 是唯一出口（生成新计划并把状态置回 in_progress）。"
+    )
 
 
 def load_config(root: Path | None = None) -> dict:
@@ -296,11 +330,57 @@ def _update_gitignore(root: Path) -> None:
 def cmd_project_set(args) -> int:
     _, paths, project = ctx(args)
     patch = core.load_json(Path(args.patch)) if args.patch else {}
-    if getattr(args, "profile", None):
-        patch["quality_profile"] = args.profile
-    if not patch:
+    profile = getattr(args, "profile", None)
+    if not patch and not profile:
         raise DevFlowError("没有要更新的内容：给 --patch 或 --profile")
-    merged = core.deep_merge(project.data, patch)
+
+    if not isinstance(patch, dict):
+        raise DevFlowError("--patch 文件必须是一个 JSON 对象")
+
+    protected = sorted(set(patch) & PROJECT_PROTECTED_FIELDS)
+    if protected:
+        raise DevFlowError(
+            "这些字段由状态机维护，不能用 project-set 改："
+            + "、".join(protected)
+            + "\n需要改状态请走对应流程（change-apply / migrate / release-*）"
+        )
+    unknown = sorted(set(patch) - PROJECT_SET_FIELDS)
+    if unknown:
+        raise DevFlowError(
+            "project-set 只允许修改："
+            + "、".join(sorted(PROJECT_SET_FIELDS))
+            + "\n不允许："
+            + "、".join(unknown)
+        )
+
+    merged = core.deep_merge(project.data, patch) if patch else dict(project.data)
+
+    if profile:
+        old_profile, _ = core.project_profile(paths.root)
+        if profile != old_profile:
+            reason = getattr(args, "reason", None)
+            by = getattr(args, "by", None)
+            if not reason or not by:
+                raise DevFlowError(
+                    "切换质量档位是受控操作：必须提供 --reason 和 --by，"
+                    "记录会写进 project.json 的 profile_changes"
+                )
+            if old_profile == "production" and profile == "development" \
+                    and not getattr(args, "confirm_downgrade", False):
+                raise DevFlowError(
+                    "把 production 降级为 development 需要显式确认："
+                    "加 --confirm-downgrade（并写清理由）"
+                )
+            merged.setdefault("profile_changes", []).append({
+                "from": old_profile,
+                "to": profile,
+                "reason": reason,
+                "by": by,
+                "at": core.now_iso(),
+            })
+            print(f"! 质量档位：{old_profile} → {profile}（{by}：{reason}）")
+        merged["quality_profile"] = profile
+
     sv = validator.SchemaValidator(SKILL_DIR / "schemas")
     errors = sv.validate(merged, "project.schema.json")
     if errors:
@@ -319,6 +399,18 @@ def cmd_project_set(args) -> int:
 def cmd_req_import(args) -> int:
     _, paths, project = ctx(args)
     data = core.load_json(Path(args.file))
+
+    # 先查验收标准：这比 Schema 的 oneOf 报错更容易看懂
+    # （只查 active 的验收标准；非 active 的退役凭据由 validate / 回归检查）
+    spec_problems: list[str] = []
+    for req in (data.get("requirements") or []) if isinstance(data, dict) else []:
+        if isinstance(req, dict):
+            spec_problems.extend(core.acceptance_spec_problems(req))
+    if spec_problems:
+        raise DevFlowError(
+            "需求追踪表不满足规则，未导入：\n  " + "\n  ".join(spec_problems)
+        )
+
     sv = validator.SchemaValidator(SKILL_DIR / "schemas")
     errors = sv.validate(data, "requirements.schema.json")
     if errors:
@@ -333,14 +425,17 @@ def cmd_req_import(args) -> int:
     print(f"已写入 {paths.rel(versioned)}：{len(data['requirements'])} 条需求（v{version}）")
     print(f"当前指针已更新：{paths.rel(paths.traceability)}")
 
-    uncovered = [r["req_id"] for r in data["requirements"] if not r.get("acceptance")]
-    if uncovered:
-        print(f"! 这些需求没有验收标准：{', '.join(uncovered)}")
     return 0
 
 
 def cmd_req_confirm(args) -> int:
     _, paths, project = ctx(args)
+    status = project.effective_status()
+    if status in ("in_progress", "regression", "release_candidate", "release_ready"):
+        raise DevFlowError(
+            f"项目已进入 {status} 阶段，需求基准不能原地重确认。"
+            "需要改需求请走变更流程：change-new → change-apply"
+        )
     version = args.version or project.data.get("current_requirement_version") or 1
     doc = paths.confirmed_requirements(version)
     if not doc.exists():
@@ -351,6 +446,23 @@ def cmd_req_confirm(args) -> int:
     for section in ("验收标准", "业务规则", "功能需求"):
         if section not in text:
             print(f"! 需求基准里没有出现「{section}」段落，确认前先检查")
+
+    # 不能只看 Markdown 在不在：追踪表本身也得合格
+    trace = core.load_traceability(paths)
+    if not trace:
+        raise DevFlowError(
+            f"缺少需求追踪表 {paths.rel(paths.traceability)}；先 req-import 再确认"
+        )
+    trace_problems = core.traceability_problems(trace)
+    if trace_problems:
+        raise DevFlowError(
+            "需求追踪表不满足规则，不能确认：\n  " + "\n  ".join(trace_problems)
+        )
+    trace_version = trace.get("requirement_version")
+    if trace_version is not None and str(trace_version) != str(version):
+        raise DevFlowError(
+            f"追踪表是 v{trace_version}，确认的是 v{version}；先导入对应版本"
+        )
 
     project.data["current_requirement_version"] = version
     project.data["status"] = "requirements_confirmed"
@@ -1033,6 +1145,78 @@ def _import_external_reports(paths: core.Paths, node: dict, args) -> None:
     print(f"外部报告已导入：{paths.rel(core.report_path(paths, node, 'execution_report'))}")
 
 
+def evaluate_node_changes(
+    paths: core.Paths,
+    node: dict,
+    gates: dict,
+    modified: list,
+) -> dict:
+    """把"报告声明 + Git 实际改动"合起来算范围与差异。
+
+    sync 和 accept 都必须走这里：accept 不能信任 sync 时存下的旧结论，
+    否则 sync 之后新加的越界文件就能溜进验收。
+    """
+    git_gates = gates.get("gates", {}).get("git", {})
+    git_gate = git_gates.get("verify_changes", "warn")
+    git_required = bool(git_gates.get("required", False))
+    empty_policy = gates.get("gates", {}).get("empty_scope", "outputs_only")
+
+    actual: list[str] | None = None
+    unavailable = False
+    discrepancies: list[str] = []
+
+    if git_gate != "off":
+        actual = core.git_changes_since(paths.root, node.get("git_baseline"))
+        if actual is None:
+            unavailable = True
+            if git_required:
+                discrepancies.append(
+                    "Git 变更检测不可用（不是 git 仓库 / 项目不是仓库根），"
+                    "当前质量配置要求必须能核对实际变更"
+                )
+        else:
+            reported = set()
+            for item in modified or []:
+                try:
+                    reported.add(core.normalize_rel(item))
+                except ValueError:
+                    continue
+            for path in sorted(set(actual) - reported):
+                discrepancies.append(f"实际改动但报告未列：{path}")
+            for path in sorted(reported - set(actual)):
+                discrepancies.append(f"报告列出但未检测到改动：{path}")
+
+    scope_input: list[str] = []
+    for item in list(modified or []) + list(actual or []):
+        try:
+            norm = core.normalize_rel(item)
+        except ValueError:
+            continue
+        if norm not in scope_input:
+            scope_input.append(norm)
+
+    violations = core.scope_violations(node, scope_input, paths.root, empty_policy)
+    return {
+        "actual": actual,
+        "unavailable": unavailable,
+        "discrepancies": discrepancies,
+        "scope_input": scope_input,
+        "violations": violations,
+        "git_required": git_required,
+        "git_gate": git_gate,
+    }
+
+
+def _violating_files(violations: list[str]) -> list[str]:
+    """从 `path: 原因` 形式的越界信息里取出文件路径。"""
+    files = []
+    for item in violations:
+        path = str(item).split(":", 1)[0].strip()
+        if path and path not in files:
+            files.append(path)
+    return files
+
+
 def cmd_sync(args) -> int:
     _, paths, project = ctx(args)
     plan = project.current_plan()
@@ -1095,47 +1279,18 @@ def cmd_sync(args) -> int:
         return 1
 
     modified = (evidence or {}).get("modified_files") or []
+    evaluation = evaluate_node_changes(paths, node, gates, modified)
+    actual = evaluation["actual"]
+    discrepancies = evaluation["discrepancies"]
+    violations = evaluation["violations"]
+    git_gate = evaluation["git_gate"]
 
-    # ---- 实际变更核对：Git 看到的改动必须一起进范围校验 ----
-    git_gates = gates.get("gates", {}).get("git", {})
-    git_gate = git_gates.get("verify_changes", "warn")
-    git_required = bool(git_gates.get("required", False))
-    discrepancies: list[str] = []
-    actual: list[str] | None = None
-    if git_gate != "off":
-        actual = core.git_changes_since(paths.root, node.get("git_baseline"))
-        node["git_actual_changes"] = actual or []
-        if actual is None:
-            if git_required:
-                discrepancies.append(
-                    "Git 变更检测不可用（不是 git 仓库 / 项目不是仓库根），"
-                    "当前质量配置要求必须能核对实际变更"
-                )
-            node["git_unavailable"] = True
-        else:
-            node.pop("git_unavailable", None)
-            reported = set()
-            for item in modified:
-                try:
-                    reported.add(core.normalize_rel(item))
-                except ValueError:
-                    continue
-            for path in sorted(set(actual) - reported):
-                discrepancies.append(f"实际改动但报告未列：{path}")
-            for path in sorted(reported - set(actual)):
-                discrepancies.append(f"报告列出但未检测到改动：{path}")
+    if actual is not None:
+        node["git_actual_changes"] = actual
+        node.pop("git_unavailable", None)
+    if evaluation["unavailable"]:
+        node["git_unavailable"] = True
     node["git_discrepancies"] = discrepancies
-
-    # 合并：报告声明 ∪ 实际改动。漏报的越界文件同样必须被拦下。
-    scope_input: list[str] = []
-    for item in list(modified) + list(actual or []):
-        try:
-            norm = core.normalize_rel(item)
-        except ValueError:
-            continue
-        if norm not in scope_input:
-            scope_input.append(norm)
-    violations = core.scope_violations(node, scope_input, paths.root, empty_policy)
     node["scope_violations"] = violations
 
     transition(node, "needs_review")
@@ -1156,7 +1311,7 @@ def cmd_sync(args) -> int:
         print("! Git 实际变更与报告不一致：")
         for item in discrepancies[:10]:
             print(f"  - {item}")
-        if git_gate == "error" or (git_required and node.get("git_unavailable")):
+        if git_gate == "error" or (evaluation["git_required"] and evaluation["unavailable"]):
             print("验收已被阻止。确认无误后：accept --ack-changes --reason \"...\"")
             return 1
         print("（配置为 warn，验收前请人工确认）")
@@ -1188,6 +1343,7 @@ def cmd_accept(args) -> int:
     plan = project.current_plan()
     node = project.find_node(args.node_id, plan)
     gates = load_config(paths.root).get("quality-gates", {})
+    accept_gates = gates.get("gates", {}).get("node_accept", {})
 
     if node["status"] == "completed":
         print(f"{node['node_id']} 已经是 completed")
@@ -1197,7 +1353,31 @@ def cmd_accept(args) -> int:
             f"{node['node_id']} 状态是 {node['status']}，只有 needs_review 能验收。先运行 sync。"
         )
 
-    violations = node.get("scope_violations") or []
+    # ---- 实时复核：不信任 sync 时存下的结论 ----
+    evidence = core.load_execution_evidence(paths, node) or {}
+    modified = evidence.get("modified_files") or []
+    evaluation = evaluate_node_changes(paths, node, gates, modified)
+    violations = evaluation["violations"]
+    discrepancies = evaluation["discrepancies"]
+
+    node["scope_violations"] = violations
+    node["git_discrepancies"] = discrepancies
+    if evaluation["actual"] is not None:
+        node["git_actual_changes"] = evaluation["actual"]
+        node.pop("git_unavailable", None)
+    if evaluation["unavailable"]:
+        node["git_unavailable"] = True
+    # 先把实时结论落盘：即使验收被拒，也要留下"当时发现了什么"
+    project.save_plan(plan)
+
+    # Git 检测不可用且配置要求必须可用：--ack-changes 也不能放行
+    if evaluation["unavailable"] and evaluation["git_required"]:
+        print("✗ 当前质量配置要求核对 Git 实际变更，但检测不可用：")
+        print("  - 请把项目放进 Git 仓库根目录，或改用文件级快照策略")
+        plan_meta = plan.get("plan_version")
+        print(f"（节点 {node['node_id']} · 计划 v{plan_meta}）")
+        return 1
+
     if violations:
         allow = getattr(args, "allow_scope", False)
         reason = getattr(args, "reason", None)
@@ -1207,19 +1387,20 @@ def cmd_accept(args) -> int:
                 print(f"  - {item}")
             print("确认必要请用：accept --allow-scope --reason \"为什么必须改这些文件\"")
             return 1
+        files = _violating_files(violations)
         node.setdefault("scope_waivers", []).append({
             "reason": reason,
             "at": core.now_iso(),
             "by": args.by or "user",
+            "files": files,
+            "detail": violations[:50],
+            "plan_version": plan.get("plan_version"),
         })
         node["scope_violations"] = []
         print(f"! 已记录范围豁免：{reason}")
+        print(f"  豁免文件：{', '.join(files[:10]) or '（未能解析）'}")
 
-    git_gates = gates.get("gates", {}).get("git", {})
-    git_gate = git_gates.get("verify_changes", "warn")
-    git_required = bool(git_gates.get("required", False))
-    discrepancies = node.get("git_discrepancies") or []
-    if discrepancies and (git_gate == "error" or git_required):
+    if discrepancies and (evaluation["git_gate"] == "error" or evaluation["git_required"]):
         allow = getattr(args, "ack_changes", False)
         reason = getattr(args, "reason", None)
         if not (allow and reason):
@@ -1232,6 +1413,7 @@ def cmd_accept(args) -> int:
             "reason": reason,
             "at": core.now_iso(),
             "by": args.by or "user",
+            "detail": discrepancies[:50],
         })
         print(f"! 已确认 Git 差异：{reason}")
 
@@ -1249,6 +1431,8 @@ def cmd_accept(args) -> int:
     node["deliverables"] = snapshot
     unlocked = refresh(project, plan, quiet=True)
     print(f"✓ {node['node_id']} {node['node_name']} 验收通过")
+    print(f"实时核对：Git 实际变更 {len(evaluation['actual'] or [])} 个文件，"
+          f"越界 {len(violations)} 项")
     if snapshot["files"]:
         print(f"交付物指纹已记录：{len(snapshot['files'])} 个文件")
     if unlocked:
@@ -1757,8 +1941,10 @@ def cmd_regression_check(args) -> int:
             if all(n.get("no_test") for n in completed_owners) and \
                     req.get("category") not in ("constraint", "acceptance"):
                 uncovered.append(f"{req['req_id']} 只有 no_test 节点覆盖，缺少可执行验证")
-            elif req.get("acceptance") and \
-                    _requirement_evidence_missing(paths, req, completed_owners):
+            spec_problems = core.acceptance_spec_problems(req)
+            if spec_problems:
+                uncovered.extend(spec_problems)
+            elif _requirement_evidence_missing(paths, req, completed_owners):
                 uncovered.append(
                     f"{req['req_id']} 的验收标准没有对应验证证据"
                     "（覆盖节点的报告里没有 met=true 且带证据的验收项）"
@@ -3218,10 +3404,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="质量门槛档位（默认 development）")
     p.add_argument("--force", action="store_true")
 
-    p = add("project-set", cmd_project_set, "更新 project.json（patch 或质量档位）")
-    p.add_argument("--patch", default=None)
+    p = add("project-set", cmd_project_set, "更新 project.json（受限字段）或质量档位")
+    p.add_argument("--patch", default=None, help="只含允许字段的 JSON 文件")
     p.add_argument("--profile", choices=["development", "production"], default=None,
-                   help="切换质量门槛档位（旧项目升级用）")
+                   help="受控切换质量档位（需 --reason 与 --by）")
+    p.add_argument("--reason", default=None, help="切换档位的原因")
+    p.add_argument("--by", default=None, help="谁做的这次变更")
+    p.add_argument("--confirm-downgrade", action="store_true",
+                   help="确认把 production 降级为 development")
 
     p = add("req-import", cmd_req_import, "导入需求追踪表")
     p.add_argument("--file", required=True)
@@ -3369,12 +3559,10 @@ def main(argv=None) -> int:
                 status = core.PROJECT_STATUS_MIGRATIONS.get(
                     data.get("status"), data.get("status")
                 )
-                if status == "accepted" and args.cmd in FROZEN_ON_ACCEPTED:
-                    raise DevFlowError(
-                        f"项目已验收（accepted），不能再执行 {args.cmd}。\n"
-                        "需要继续开发请走变更流程：change-new → change-apply"
-                        "（生成新计划并把状态置为 in_progress）。"
-                    )
+                if status == "accepted":
+                    denial = accepted_denial(args.cmd)
+                    if denial:
+                        raise DevFlowError(denial)
                 return args.func(args)
         return args.func(args)
     except DevFlowError as exc:

@@ -1,6 +1,6 @@
 # DevFlow
 
-> 版本 1.4 · 生产质量门禁版（证据硬校验 / Git 实际变更合并校验 / 交付报告强制完整 / 回归绑定源码快照 / 需求逐条验收 / 并行通配符冲突 / development·production 双档位 / self-test 含并行与外部支线）
+> 版本 1.4.1 · 生产质量门禁版（证据硬校验 / Git 实际变更合并校验 / 交付报告强制完整 / 回归绑定源码快照 / 需求逐条验收 / 并行通配符冲突 / development·production 双档位 / self-test 含并行与外部支线）
 
 把一份需求文档变成**能真正执行到交付**的开发流水线。
 
@@ -91,6 +91,8 @@ V1 的校验层偏软——多个关键约束只打印警告、不改变状态�
 | Agent 漏报越界文件 | Git 实际变更与报告合并后再过 `files_scope` |
 | 回归跑完又改代码 | 回归报告绑定源码快照；导入/交付时复核，代码一变旧结论作废 |
 | 交付报告没写完就交付 | 只接受首次生成的完整报告，章节/版本/占位符都校验 |
+| sync 之后偷偷改文件 | `accept` 实时重算 Git 变更并重跑范围校验 |
+| accepted 之后还被改写 | 白名单终态，只有 `change-apply` 能退出 |
 
 审计报告见 `docs/engineering-audit.md`、`docs/engineering-audit-v1.4.md`；
 版本变化见 `docs/release-notes-v1.4.md`。

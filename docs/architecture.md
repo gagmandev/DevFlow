@@ -104,7 +104,9 @@ pending → ready → in_progress → needs_review → completed
 | 文档和代码漂移 | `tests/test_docs_consistency.py` + `df.py self-test` |
 | 回归后代码又改了 | `regression-check` 记录源码快照，导入/交付时复核 |
 | 交付报告没写完就交付 | `release-report.json` 元信息 + 章节/占位符校验 |
-| 门禁一套用到底 | `quality_profile`：development / production 两档 |
+| 门禁一套用到底 | `quality_profile`：development / production 两档，切换留痕 |
+| 验收前偷改文件 | `accept` 实时重算 Git 变更并重跑范围校验 |
+| accepted 之后被改写 | 白名单终态：只有 change-apply 能退出 |
 
 ## 八、扩展点
 

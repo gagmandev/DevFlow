@@ -61,6 +61,8 @@
 ]
 ```
 
+- **active 需求没有验收标准会被直接拒绝**：`req-import` 报错、`validate` 报 error、
+  `regression-check` 再拦一次（空数组、空白字符串、空 `criterion` 都算没有）
 - 每条 active 需求的每条验收标准都要有一项
 - 不能用别的 REQ 的证据，也不能"启动成功"代替业务验收
 - 需求验收标准建议写成 `{id, criterion}`，文本改了也能对上

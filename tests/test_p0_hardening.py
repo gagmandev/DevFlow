@@ -469,6 +469,49 @@ class LockTest(unittest.TestCase):
         self.assertFalse(outcome.get("got"), "第二个线程不应拿到锁")
         self.assertGreater(outcome.get("waited", 0), 0.1, "第二个线程应该真的等待过")
 
+    def test_release_not_blocked_by_waiter(self):
+        """持有者释放不能被等待者卡住：A 退出 with 必须立刻完成。"""
+        import threading
+        import time
+
+        a_in = threading.Event()
+        b_trying = threading.Event()
+        release_a = threading.Event()
+        result = {}
+
+        def holder():
+            with core.project_lock(Path(self.tmp), timeout=10):
+                a_in.set()
+                release_a.wait(10)
+                started = time.time()
+            result["release_seconds"] = time.time() - started
+
+        def waiter():
+            a_in.wait(10)
+            b_trying.set()
+            began = time.time()
+            with core.project_lock(Path(self.tmp), timeout=10):
+                result["waited"] = time.time() - began
+                result["acquired"] = True
+
+        ta = threading.Thread(target=holder)
+        tb = threading.Thread(target=waiter)
+        ta.start()
+        tb.start()
+        self.assertTrue(b_trying.wait(5))
+        time.sleep(0.2)          # 确保 B 已经在等
+        release_a.set()
+        ta.join(10)
+        tb.join(10)
+
+        self.assertFalse(ta.is_alive(), "持有者未能退出（释放被卡住）")
+        self.assertLess(result.get("release_seconds", 99), 1.0,
+                        f"释放耗时 {result.get('release_seconds')}s，说明等待者占住了管理锁")
+        self.assertTrue(result.get("acquired"), "等待者最终应拿到锁")
+        state = core.lock_slot_state(Path(self.tmp))
+        self.assertEqual(state["depth"], 0, "重入计数没有归零")
+        self.assertFalse(state["locked"], "OS 锁没有释放")
+
     def test_concurrent_start_no_lost_update(self):
         """多个进程同时 start 不同节点，不能互相覆盖。"""
         p = Project()

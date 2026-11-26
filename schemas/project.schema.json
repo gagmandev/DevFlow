@@ -23,6 +23,27 @@
       "enum": ["development", "production"],
       "description": "质量门槛档位；production 会打开 Git 核对、源码快照、交付报告强制校验"
     },
+    "release_candidate_at": { "type": ["string", "null"] },
+    "release_ready_at": { "type": ["string", "null"] },
+    "accepted_at": { "type": ["string", "null"] },
+    "accepted_by": { "type": ["string", "null"] },
+    "legacy_regression_accepted": { "type": "boolean" },
+    "profile_changes": {
+      "type": "array",
+      "description": "质量档位变更记录（受控操作）",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "reason", "by", "at"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "reason": { "type": "string", "minLength": 1 },
+          "by": { "type": "string", "minLength": 1 },
+          "at": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "legacy_release_shortcut": {
       "type": "boolean",
       "description": "旧项目兼容：允许从 regression 直接 release_ready（只能由 migrate 写入）"

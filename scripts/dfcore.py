@@ -242,10 +242,11 @@ class ProjectLock:
 
     # -- 对外 --------------------------------------------------------------
 
-    def acquire(self) -> None:
+    def acquire(self, timeout: float | None = None) -> None:
+        wait = self.timeout if timeout is None else float(timeout)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
-        deadline = time.time() + self.timeout
+        deadline = time.time() + wait
         while True:
             if self._try_lock(self.fd):
                 self._locked = True
@@ -349,34 +350,72 @@ class ProjectLock:
 
 #: (锁文件路径, 线程 id) → (锁对象, 重入深度)
 #: 按线程区分：同一线程可重入，不同线程必须去争 OS 锁，不能共用 depth。
-_LOCKS: dict[tuple[str, int], tuple["ProjectLock", int]] = {}
-_LOCKS_GUARD = threading.Lock()
+#: 项目锁槽位：每个锁文件一个。
+#: - `rlock` 只负责"同一进程内不同线程互斥"，且天然支持同线程重入
+#: - `lock` 是跨进程的 OS 文件锁，只在最外层持有时拿一次
+#: 关键点：等待 `rlock` 时必须**在全局 guard 之外**，否则持有者释放时会被卡住。
+class _LockSlot:
+    __slots__ = ("rlock", "lock", "depth")
+
+    def __init__(self, path: Path, timeout: float | None):
+        self.rlock = threading.RLock()
+        self.lock = ProjectLock(path, timeout)
+        self.depth = 0
+
+
+_LOCK_SLOTS: dict[str, _LockSlot] = {}
+_LOCK_SLOTS_GUARD = threading.Lock()
+
+
+def _lock_slot(df_dir: Path, timeout: float | None) -> _LockSlot:
+    key = str(Path(df_dir).resolve())
+    with _LOCK_SLOTS_GUARD:
+        slot = _LOCK_SLOTS.get(key)
+        if slot is None:
+            slot = _LockSlot(Path(df_dir) / ".lock", timeout)
+            _LOCK_SLOTS[key] = slot
+        return slot
 
 
 @contextmanager
 def project_lock(df_dir: Path, timeout: float | None = None):
-    """同一线程可重入 + 跨线程/跨进程排他的项目写锁。"""
-    key = (str(Path(df_dir).resolve()), threading.get_ident())
-    with _LOCKS_GUARD:
-        if key in _LOCKS:
-            lock, depth = _LOCKS[key]
-            _LOCKS[key] = (lock, depth + 1)
-            first = False
-        else:
-            lock = ProjectLock(Path(df_dir) / ".lock", timeout)
-            lock.acquire()
-            _LOCKS[key] = (lock, 1)
-            first = True
+    """同一线程可重入 + 跨线程/跨进程排他的项目写锁。
+
+    线程 A 持锁时线程 B 阻塞在 `slot.rlock` 上（不占全局 guard），
+    A 释放后 B 立即拿到；不同进程仍由 OS 文件锁互斥。
+    """
+    wait = float(os.environ.get("DEVFLOW_LOCK_TIMEOUT", "15")) if timeout is None else float(timeout)
+    slot = _lock_slot(Path(df_dir), timeout)
+    if not slot.rlock.acquire(timeout=max(wait, 0.01)):
+        raise LockTimeout(
+            "无法获取 DevFlow 写锁（同一进程内的其他线程正在修改项目状态）。\n"
+            f"  锁文件：{Path(df_dir) / '.lock'}\n"
+            f"  等待 {wait:g}s 超时后退出，未做任何修改。"
+        )
+    acquired_os = False
     try:
-        yield lock
+        if slot.depth == 0:
+            slot.lock.acquire(timeout=wait)
+            acquired_os = True
+        slot.depth += 1
+        try:
+            yield slot.lock
+        finally:
+            slot.depth -= 1
+            if slot.depth == 0 and acquired_os:
+                slot.lock.release()
     finally:
-        with _LOCKS_GUARD:
-            lock, depth = _LOCKS[key]
-            if depth > 1:
-                _LOCKS[key] = (lock, depth - 1)
-            else:
-                del _LOCKS[key]
-                lock.release()
+        slot.rlock.release()
+
+
+def lock_slot_state(df_dir: Path) -> dict:
+    """排查用：当前锁槽位深度与是否持有 OS 锁。"""
+    key = str(Path(df_dir).resolve())
+    with _LOCK_SLOTS_GUARD:
+        slot = _LOCK_SLOTS.get(key)
+    if slot is None:
+        return {"exists": False, "depth": 0, "locked": False}
+    return {"exists": True, "depth": slot.depth, "locked": slot.lock._locked}
 
 
 # 兼容旧调用
@@ -1851,6 +1890,54 @@ def acceptance_items(req: dict) -> list[dict]:
             if text:
                 items.append({"id": entry.get("id"), "text": text})
     return items
+
+
+ACCEPTANCE_ID_RE = re.compile(r"^AC-[0-9A-Za-z._-]+$")
+
+
+def acceptance_spec_problems(req: dict) -> list[str]:
+    """active 需求的验收标准本身是否合格。
+
+    非 active（deferred / out_of_scope / removed / changed）不要求验收标准，
+    它们由 reason / confirmed_by / superseded_by 规则约束。
+    """
+    if req.get("status") != "active":
+        return []
+    req_id = req.get("req_id") or "?"
+    items = req.get("acceptance")
+    if items is None:
+        return [f"{req_id}: active 需求必须至少有一条验收标准（acceptance）"]
+    if not isinstance(items, list):
+        return [f"{req_id}: acceptance 必须是数组"]
+    if not items:
+        return [f"{req_id}: acceptance 为空；active 需求至少要有一条可判断真假的验收标准"]
+    problems: list[str] = []
+    for idx, item in enumerate(items):
+        if isinstance(item, str):
+            if not item.strip():
+                problems.append(f"{req_id}: acceptance[{idx}] 是空字符串")
+            continue
+        if isinstance(item, dict):
+            criterion = item.get("criterion")
+            if not isinstance(criterion, str) or not criterion.strip():
+                problems.append(f"{req_id}: acceptance[{idx}] 的 criterion 为空")
+            cid = item.get("id")
+            if cid is not None and not ACCEPTANCE_ID_RE.match(str(cid)):
+                problems.append(
+                    f"{req_id}: acceptance[{idx}] 的 id={cid!r} 不匹配 AC-xxx 格式"
+                )
+            continue
+        problems.append(f"{req_id}: acceptance[{idx}] 只能是字符串或 {{criterion, id}} 对象")
+    return problems
+
+
+def traceability_problems(trace: dict) -> list[str]:
+    """需求追踪表整体校验（导入/确认/回归都要用同一套）。"""
+    problems: list[str] = []
+    for req in trace.get("requirements", []) or []:
+        problems.extend(acceptance_spec_problems(req))
+        problems.extend(requirement_retirement_problems(req))
+    return problems
 
 
 def requirement_acceptance_problems(

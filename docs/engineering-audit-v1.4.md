@@ -66,7 +66,7 @@
 
 ## 四、测试
 
-- 引擎：`python -m unittest discover -s tests` → 195 条
+- 引擎：`python -m unittest discover -s tests` → 223 条
 - 示例项目：74 条
 - 端到端：`python scripts/df.py self-test` → 60 步（主链路 + 并行 + 外部报告）
 
@@ -84,3 +84,31 @@
 3. 并行例外仍需人工判断，工具只负责"不静默放行"。
 4. 单主控架构不变：文件锁防覆盖，不做多主控合并。
 5. `self-test` 的并行场景用两个子进程，不覆盖真机多机并发。
+
+## 十、V1.4.1 复审（对 `a70334c` 的增量审计）
+
+V1.4 落地后复审又发现 5 个门禁缺口和 2 个连带缺陷。编号 V141-xx。
+
+| 编号 | 位置 | 问题 | 风险 | 修复 |
+| --- | --- | --- | --- | --- |
+| V141-01 | `df.cmd_accept` | 只读 sync 存下的 `scope_violations` / `git_discrepancies` | sync 之后新增越界文件可绕过验收 | `accept` 在锁内用 `start` 的 Git baseline 重算，合并报告声明后重跑 `scope_violations`；实时结论先落盘再判定 |
+| V141-02 | `df.FROZEN_ON_ACCEPTED` | 黑名单只挡部分命令 | `project-set` 改 `status`、`req-confirm` 改状态、`req-import` 替换基准都能绕过终态 | 改为 `ACCEPTED_ALLOWED` 白名单，默认拒绝；`change-apply` 为唯一出口 |
+| V141-03 | `df.cmd_project_set` | patch 任意字段、`--profile` 可降级 | 生产门禁可被静默降级 | 字段白名单 + 受保护字段拒绝；档位变更需 `--reason --by`，降级另需 `--confirm-downgrade`，写 `profile_changes` |
+| V141-04 | `schemas/requirements.schema.json` 等 | active 需求可无 `acceptance`，`req-import` 只警告，回归用 truthy 跳过 | 需求级验收可整体跳过 | `acceptance_spec_problems()` 三道闸（import/validate/regression-check）；`req-confirm` 复查追踪表 |
+| V141-05 | `dfcore.project_lock` | 在 `_LOCKS_GUARD` 内阻塞 `lock.acquire()` | 等待者占住管理锁，持有者无法释放（release 饥饿） | 每路径 `RLock`（同线程重入、跨线程互斥）+ 独立 OS 锁；等待在 guard 之外 |
+| V141-06 | `df.cmd_change_new` | 生成的 CR `impacts=[]` 与 schema `minItems: 1` 冲突 | 新建 CR 后 `change-set` 必然失败，变更流程走不通 | schema 允许 draft 空 impacts；`change-apply` 强制非空影响评估 |
+| V141-07 | `schemas/project.schema.json` | 缺 `accepted_at` / `release_ready_at` 等字段 | accepted 项目跑 `validate` 必报"不允许的字段" | 补齐生命周期字段，`legacy_regression_accepted` 一并补上 |
+
+### V1.4.1 测试
+
+- `tests/test_v14_gates.py::AcceptLiveGitTest`（7 条）：干净验收、sync 后新增越界、改名、范围内修改、`--ack-changes` 不能放行、豁免记录文件、production 无 Git 必败
+- `tests/test_v14_gates.py::AcceptedGuardTest`（4 条）：全命令白名单枚举、accepted 下写命令全拒、CR 可编辑但状态不变、`change-apply` 是唯一出口
+- `tests/test_v14_gates.py::ProjectSetGuardTest`（3 条）：受保护字段、允许字段、档位受控与留痕
+- `tests/test_v14_gates.py::RequirementSpecTest`（9 条）：缺 acceptance / 空数组 / 空白字符串 / 空 criterion / 非 active 规则 / 手工绕过 validate 与 regression-check / req-confirm 复查
+- `tests/test_p0_hardening.py::LockTest::test_release_not_blocked_by_waiter`：等待者不阻塞持有者释放，深度与 OS 锁归零
+
+### 仍然存在的限制
+
+- `accept` 的实时核对只覆盖 Git 可见的改动；非 Git 项目依赖 `files_scope` 与人工判断（production 已强制要求 Git）。
+- 白名单意味着新写命令默认不能在 accepted 上运行；这是有意的默认拒绝。
+- 线程锁解决的是同进程多线程；多进程仍靠 OS 文件锁，不做合并。

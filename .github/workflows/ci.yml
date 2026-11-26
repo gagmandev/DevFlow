@@ -17,8 +17,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.8", "3.12"]
+        include:
+          # Python 3.8 在 ubuntu-latest（24.04/26.04）没有对应构建，固定到 22.04
+          - os: ubuntu-22.04
+            python: "3.8"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.8"
+          - os: windows-latest
+            python: "3.12"
 
     steps:
       - uses: actions/checkout@v4

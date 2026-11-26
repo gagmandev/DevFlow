@@ -292,8 +292,8 @@ def validate_all(
         req_ids = {r["req_id"] for r in reqs}
         by_req = {r["req_id"]: r for r in reqs if r.get("req_id")}
         for req in reqs:
-            if req.get("status") == "active" and not req.get("acceptance"):
-                report.warn(f"{req['req_id']} 没有验收标准（acceptance）")
+            for problem in core.acceptance_spec_problems(req):
+                report.error(problem)
             for problem in core.requirement_retirement_problems(req, by_req):
                 report.error(problem)
     elif project.get("current_requirement_version"):
